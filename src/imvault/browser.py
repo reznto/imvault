@@ -11,7 +11,7 @@ import webbrowser
 from functools import partial
 from importlib import resources
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from .db import IMMessageDB
 
@@ -132,8 +132,9 @@ class _BrowseHandler(http.server.BaseHTTPRequestHandler):
                     for msg in messages:
                         for att in msg.get("attachments", []):
                             if att.get("filename"):
-                                # Encode the path for URL
-                                att["path"] = f"/attachment?path={att['filename']}"
+                                # URL-encode the path
+                                encoded_path = quote(att["filename"], safe="")
+                                att["path"] = f"/attachment?path={encoded_path}"
 
                     chat_data = {
                         "chat": chat_meta,
