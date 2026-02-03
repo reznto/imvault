@@ -4,6 +4,7 @@ import http.server
 import logging
 import os
 import socket
+import sys
 import tarfile
 import tempfile
 import threading
@@ -34,6 +35,15 @@ def _validate_tar_member(member: tarfile.TarInfo, dest: str) -> bool:
     return True
 
 
+def _format_size(size: int) -> str:
+    """Format byte size to human-readable string."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP handler that suppresses request logs and broken-pipe errors."""
 
@@ -58,19 +68,40 @@ def view_archive(archive_path: str, password: str) -> None:
     if not os.path.isfile(archive_path):
         raise FileNotFoundError(f"Archive not found: {archive_path}")
 
+    file_size = os.path.getsize(archive_path)
+    print(f"Loading archive ({_format_size(file_size)})...")
+
+    # Read file
+    print("  Reading encrypted data...", end="", flush=True)
     with open(archive_path, "rb") as f:
         data = f.read()
+    print(" done")
 
+    # Decrypt
+    print("  Decrypting...", end="", flush=True)
     tar_gz = decrypt_archive(data, password)
+    # Free encrypted data memory
+    del data
+    print(" done")
 
     with tempfile.TemporaryDirectory(prefix="imvault_") as tmpdir:
         # Extract tar.gz to temp directory
+        print("  Extracting files...", end="", flush=True)
         with tarfile.open(fileobj=BytesIO(tar_gz), mode="r:gz") as tf:
-            for member in tf.getmembers():
+            members = tf.getmembers()
+            total = len(members)
+            for i, member in enumerate(members):
                 if not _validate_tar_member(member, tmpdir):
                     logger.warning("Skipping suspicious tar member: %s", member.name)
                     continue
                 tf.extract(member, tmpdir)
+                # Show progress every 100 files or at the end
+                if (i + 1) % 100 == 0 or i + 1 == total:
+                    pct = (i + 1) * 100 // total
+                    print(f"\r  Extracting files... {i + 1}/{total} ({pct}%)", end="", flush=True)
+        # Free decrypted data memory
+        del tar_gz
+        print(" done")
 
         port = _find_free_port()
         handler = partial(_QuietHandler, directory=tmpdir)
@@ -78,7 +109,7 @@ def view_archive(archive_path: str, password: str) -> None:
         server = http.server.HTTPServer(("127.0.0.1", port), handler)
 
         url = f"http://127.0.0.1:{port}/index.html"
-        print(f"Serving archive at {url}")
+        print(f"\nServing archive at {url}")
         print("Press Ctrl+C to stop.")
 
         # Open browser in a thread so we can start serving immediately
