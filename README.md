@@ -16,6 +16,15 @@ Archive iMessage conversations from macOS into encrypted, portable `.imv` files 
 - Python 3.9+
 - **Full Disk Access** for Terminal (System Settings > Privacy & Security > Full Disk Access)
 
+### Contacts Access (Optional)
+
+On first run, macOS will prompt for Contacts access. This is used to resolve phone numbers and emails to contact names in exports.
+
+- **Allow**: Conversations show names like "John Smith" instead of "+1234567890"
+- **Deny**: Everything works, but participants appear as raw phone numbers/emails
+
+You can change this later in System Settings > Privacy & Security > Contacts.
+
 ## Installation
 
 ```bash
