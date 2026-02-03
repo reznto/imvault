@@ -47,6 +47,21 @@ pip install -e .
 imvault list
 ```
 
+### Browse conversations (no export)
+
+Browse your iMessage conversations directly without creating an archive:
+
+```bash
+imvault browse
+```
+
+This opens the same viewer interface but reads directly from chat.db. No encryption, no archive file — just quick access to browse your messages. Useful for searching or reviewing conversations before deciding what to export.
+
+To browse a backup database:
+```bash
+imvault browse --db-path /path/to/backup/chat.db
+```
+
 ### Export conversations
 
 Interactive fuzzy selector:

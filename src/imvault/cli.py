@@ -188,6 +188,22 @@ def view_archive_cmd(ctx: click.Context, archive: str) -> None:
         sys.exit(1)
 
 
+@cli.command("browse")
+@click.pass_context
+def browse_cmd(ctx: click.Context) -> None:
+    """Browse iMessage conversations directly from chat.db (no export needed)."""
+    from .browser import browse_database
+
+    db_path = ctx.obj["db_path"]
+    resolver = _make_resolver()
+
+    try:
+        browse_database(db_path, resolver=resolver)
+    except (FileNotFoundError, PermissionError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 def _format_size(size: int) -> str:
     """Format byte size to human-readable string."""
     for unit in ("B", "KB", "MB", "GB"):
