@@ -66,12 +66,24 @@ Export specific chat by ID:
 imvault export --chat 42 -o archive.imv
 ```
 
+Export multiple specific chats:
+```bash
+imvault export --chat 42 --chat 57 -o archive.imv
+```
+
 Export all conversations:
 ```bash
 imvault export --all -o archive.imv
 ```
 
 A progress bar shows export status for multi-chat archives.
+
+**Export options:**
+| Option | Description |
+|--------|-------------|
+| `--all` | Export all conversations |
+| `--chat ID` | Export specific chat ID (can be repeated) |
+| `-o, --output PATH` | Output file path (default: `imvault_export.imv`) |
 
 ### View an archive
 
@@ -81,14 +93,34 @@ imvault view archive.imv
 
 This decrypts the archive, starts a local HTTP server, and opens the iMessage-style reader in your browser. Press Ctrl+C to stop.
 
-### Options
+The viewer includes:
+- **Messages view** — iMessage-style chat bubbles with search
+- **Attachments view** — grid gallery of all photos and videos
+- **Dark mode** — toggle or follows system preference
 
+### Using a backup or recovered database
+
+You can export from a chat.db file in a different location (e.g., recovered from a backup):
+
+```bash
+imvault list --db-path /path/to/recovered/chat.db
+imvault export --db-path /path/to/recovered/chat.db -o backup.imv
 ```
---db-path PATH    Custom path to chat.db
--v, --verbose     Increase verbosity (-v for info, -vv for debug)
---version         Show version
---help            Show help
+
+Or set via environment variable:
+```bash
+export IMVAULT_DB_PATH=/path/to/recovered/chat.db
+imvault list
 ```
+
+### Global options
+
+| Option | Description |
+|--------|-------------|
+| `--db-path PATH` | Custom path to chat.db (default: `~/Library/Messages/chat.db`) |
+| `-v, --verbose` | Increase verbosity (`-v` for info, `-vv` for debug) |
+| `--version` | Show version |
+| `--help` | Show help |
 
 ## Security
 
