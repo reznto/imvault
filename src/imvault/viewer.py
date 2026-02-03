@@ -45,7 +45,7 @@ def _format_size(size: int) -> str:
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
-    """HTTP handler that suppresses request logs and broken-pipe errors."""
+    """HTTP handler that suppresses request logs and connection errors."""
 
     def log_message(self, format, *args):  # noqa: A002
         pass
@@ -53,13 +53,19 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     def handle_one_request(self):
         try:
             super().handle_one_request()
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionResetError):
             pass
 
     def finish(self):
         try:
             super().finish()
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
             pass
 
 

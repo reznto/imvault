@@ -162,6 +162,7 @@ body {
 .chat-container {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px 16px 16px;
   background: var(--chat-bg);
 }
@@ -205,6 +206,7 @@ body {
   border-radius: 18px;
   position: relative;
   word-wrap: break-word;
+  overflow-wrap: break-word;
   line-height: 1.4;
   font-size: 16px;
 }
@@ -231,15 +233,15 @@ body {
   padding: 0 12px;
 }
 .sent .timestamp { text-align: right; }
-.attachment { margin-top: 4px; }
+.attachment { margin-top: 4px; overflow: hidden; }
 .attachment img {
-  max-width: 240px;
+  max-width: min(240px, 100%);
   max-height: 240px;
   border-radius: 12px;
   display: block;
 }
 .attachment video {
-  max-width: 240px;
+  max-width: min(240px, 100%);
   border-radius: 12px;
   display: block;
 }
