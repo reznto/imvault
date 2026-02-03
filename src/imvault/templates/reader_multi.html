@@ -535,6 +535,7 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 function escapeAttr(s) {
+  if (!s) return "";
   return s.replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
@@ -577,12 +578,10 @@ let viewMode = "messages";
 
 function collectAttachments() {
   const attachments = [];
-  let totalAtts = 0;
   for (const msg of allMessages) {
     for (const att of (msg.attachments || [])) {
-      totalAtts++;
       const mime = att.mime_type || "";
-      if (mime.startsWith("image/") || mime.startsWith("video/")) {
+      if ((mime.startsWith("image/") || mime.startsWith("video/")) && att.path) {
         attachments.push({
           path: att.path,
           mime_type: mime,
@@ -590,15 +589,6 @@ function collectAttachments() {
           sender: msg.sender,
           is_from_me: msg.is_from_me
         });
-      }
-    }
-  }
-  console.log(`collectAttachments: ${allMessages.length} messages, ${totalAtts} total attachments, ${attachments.length} images/videos`);
-  if (totalAtts > 0 && attachments.length === 0) {
-    // Log first few attachment mime types to debug
-    for (const msg of allMessages.slice(0, 50)) {
-      for (const att of (msg.attachments || [])) {
-        console.log("  att:", att.mime_type, att.path?.substring(0, 50));
       }
     }
   }

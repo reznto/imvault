@@ -418,6 +418,7 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 function escapeAttr(s) {
+  if (!s) return "";
   return s.replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
