@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "imvault"
 version = "0.1.0"
-description = "Archive iMessage conversations into encrypted, portable .imv files with a self-contained HTML reader"
+description = "Browse, search, and archive iMessage conversations from macOS"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 authors = [{ name = "imvault contributors" }]
-keywords = ["imessage", "backup", "archive", "encryption"]
+keywords = ["imessage", "backup", "archive", "encryption", "browser", "viewer"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

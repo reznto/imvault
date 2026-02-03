@@ -1,11 +1,12 @@
 # imvault
 
-Archive iMessage conversations from macOS into encrypted, portable `.imv` files with a self-contained iMessage-style HTML reader.
+Browse, search, and archive iMessage conversations from macOS. View messages directly from chat.db or export to encrypted, portable `.imv` files with a self-contained HTML reader.
 
 ## Features
 
-- **Encrypted archives** — AES-256-GCM with Argon2id key derivation
-- **Self-contained HTML viewer** — iMessage-style bubble UI with search, dark mode, and media support
+- **Browse directly** — view conversations from chat.db without exporting
+- **Encrypted archives** — export to AES-256-GCM encrypted `.imv` files with Argon2id key derivation
+- **Self-contained HTML viewer** — iMessage-style bubble UI with search, dark mode, and media gallery
 - **Interactive chat selector** — fuzzy-search conversations to export with a terminal UI
 - **Portable** — `.imv` files can be stored anywhere and viewed on any machine with imvault
 - **Privacy-first** — unencrypted data never touches disk during export

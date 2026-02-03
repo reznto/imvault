@@ -35,7 +35,7 @@ def _setup_logging(verbosity: int) -> None:
 @click.option("-v", "--verbose", count=True, help="Increase verbosity (-v info, -vv debug)")
 @click.pass_context
 def cli(ctx: click.Context, db_path: str, verbose: int) -> None:
-    """imvault — Archive iMessage conversations into encrypted .imv files."""
+    """imvault — Browse, search, and archive iMessage conversations."""
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db_path
     ctx.obj["verbose"] = verbose
