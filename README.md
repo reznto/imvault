@@ -28,11 +28,20 @@ You can change this later in System Settings > Privacy & Security > Contacts.
 
 ## Installation
 
+### Homebrew (recommended)
+
+```bash
+brew tap reznto/imvault
+brew install imvault
+```
+
+### pip
+
 ```bash
 pip install imvault
 ```
 
-Or install from source:
+### From source
 
 ```bash
 git clone https://github.com/reznto/imvault.git
