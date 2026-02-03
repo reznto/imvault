@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 
 # .imv file format
 MAGIC = b"IMVAULT1"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2  # v2 uses chunked encryption for large files
+
+# Encryption chunk size (64 MB) — well under AES-GCM's 2GB limit
+CHUNK_SIZE = 64 * 1024 * 1024
 
 # Argon2id KDF parameters
 ARGON2_MEMORY_COST = 65536  # 64 MB

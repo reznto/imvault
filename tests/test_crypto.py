@@ -36,6 +36,18 @@ class TestRoundTrip:
 
         assert decrypted == plaintext
 
+    def test_multi_chunk_payload(self):
+        """Test payload that spans multiple 64MB chunks."""
+        from imvault.constants import CHUNK_SIZE
+        # Create payload slightly larger than one chunk
+        plaintext = b"y" * (CHUNK_SIZE + 1000)
+        password = "chunked-test"
+
+        encrypted = encrypt_archive(plaintext, password)
+        decrypted = decrypt_archive(encrypted, password)
+
+        assert decrypted == plaintext
+
     def test_unicode_password(self):
         plaintext = b"data"
         password = "\U0001f512\u00e9\u00f1\u00fc secure"
@@ -120,3 +132,39 @@ class TestDecryptionFailures:
 
         with pytest.raises(ValueError, match="Unsupported"):
             decrypt_archive(tampered, "pw")
+
+
+class TestV1Compatibility:
+    """Test that v1 archives can still be decrypted."""
+
+    def test_decrypt_v1_format(self):
+        """Create a v1-style archive manually and verify decryption."""
+        import os
+        import struct
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from imvault.crypto import derive_key, HEADER_SIZE
+        from imvault.constants import MAGIC, SALT_LENGTH, NONCE_LENGTH
+
+        plaintext = b"v1 test data"
+        password = "v1-password"
+
+        # Build a v1 archive manually
+        salt = os.urandom(SALT_LENGTH)
+        nonce = os.urandom(NONCE_LENGTH)
+        key = derive_key(password, salt)
+
+        header = bytearray()
+        header.extend(MAGIC)
+        header.extend(struct.pack("<H", 1))  # version 1
+        header.extend(salt)
+        header.extend(nonce)
+        header = bytes(header)
+
+        aesgcm = AESGCM(key)
+        ciphertext = aesgcm.encrypt(nonce, plaintext, header)
+
+        v1_archive = header + ciphertext
+
+        # Verify we can decrypt it
+        decrypted = decrypt_archive(v1_archive, password)
+        assert decrypted == plaintext
