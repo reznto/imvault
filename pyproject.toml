@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "imvault"
+version = "0.1.0"
+description = "Archive iMessage conversations into encrypted, portable .imv files with a self-contained HTML reader"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "imvault contributors" }]
+keywords = ["imessage", "backup", "archive", "encryption"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: Security :: Cryptography",
+    "Topic :: System :: Archiving",
+]
+dependencies = [
+    "argon2-cffi>=23.1.0",
+    "click>=8.1",
+    "cryptography>=44.0.0",
+    "nska-deserialize>=1.4.0",
+    "InquirerPy>=0.3.4",
+    "pyobjc-framework-Contacts>=10.0",
+]
+
+[project.scripts]
+imvault = "imvault.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/reznto/imvault"
+Issues = "https://github.com/reznto/imvault/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/imvault"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,94 @@
+# imvault
+
+Archive iMessage conversations from macOS into encrypted, portable `.imv` files with a self-contained iMessage-style HTML reader.
+
+## Features
+
+- **Encrypted archives** — AES-256-GCM with Argon2id key derivation
+- **Self-contained HTML viewer** — iMessage-style bubble UI with search, dark mode, and media support
+- **Interactive chat selector** — fuzzy-search conversations to export with a terminal UI
+- **Portable** — `.imv` files can be stored anywhere and viewed on any machine with imvault
+- **Privacy-first** — unencrypted data never touches disk during export
+
+## Requirements
+
+- macOS (reads from `~/Library/Messages/chat.db`)
+- Python 3.9+
+- **Full Disk Access** for Terminal (System Settings > Privacy & Security > Full Disk Access)
+
+## Installation
+
+```bash
+pip install imvault
+```
+
+Or install from source:
+
+```bash
+git clone https://github.com/reznto/imvault.git
+cd imvault
+pip install -e .
+```
+
+## Usage
+
+### List conversations
+
+```bash
+imvault list
+```
+
+### Export conversations
+
+Interactive fuzzy selector:
+```bash
+imvault export -o archive.imv
+```
+
+The selector supports:
+- **Type** to filter conversations by name
+- **Tab** to toggle selection
+- **Shift+Tab** to toggle and move up
+- **Ctrl+A** to select/deselect all visible
+- **Enter** to confirm
+
+Export specific chat by ID:
+```bash
+imvault export --chat 42 -o archive.imv
+```
+
+Export all conversations:
+```bash
+imvault export --all -o archive.imv
+```
+
+A progress bar shows export status for multi-chat archives.
+
+### View an archive
+
+```bash
+imvault view archive.imv
+```
+
+This decrypts the archive, starts a local HTTP server, and opens the iMessage-style reader in your browser. Press Ctrl+C to stop.
+
+### Options
+
+```
+--db-path PATH    Custom path to chat.db
+-v, --verbose     Increase verbosity (-v for info, -vv for debug)
+--version         Show version
+--help            Show help
+```
+
+## Security
+
+- Archives are encrypted with AES-256-GCM
+- Keys are derived using Argon2id (64 MB memory, 3 iterations)
+- The file header (magic bytes, salt, nonce, version) is used as authenticated associated data (AAD)
+- Unencrypted message data is never written to disk during export — tar.gz is assembled in memory
+- During viewing, decrypted data is extracted to a temporary directory that is cleaned up on exit
+
+## License
+
+MIT
