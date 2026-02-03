@@ -577,8 +577,10 @@ let viewMode = "messages";
 
 function collectAttachments() {
   const attachments = [];
+  let totalAtts = 0;
   for (const msg of allMessages) {
     for (const att of (msg.attachments || [])) {
+      totalAtts++;
       const mime = att.mime_type || "";
       if (mime.startsWith("image/") || mime.startsWith("video/")) {
         attachments.push({
@@ -588,6 +590,15 @@ function collectAttachments() {
           sender: msg.sender,
           is_from_me: msg.is_from_me
         });
+      }
+    }
+  }
+  console.log(`collectAttachments: ${allMessages.length} messages, ${totalAtts} total attachments, ${attachments.length} images/videos`);
+  if (totalAtts > 0 && attachments.length === 0) {
+    // Log first few attachment mime types to debug
+    for (const msg of allMessages.slice(0, 50)) {
+      for (const att of (msg.attachments || [])) {
+        console.log("  att:", att.mime_type, att.path?.substring(0, 50));
       }
     }
   }
