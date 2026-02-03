@@ -18,6 +18,22 @@ from .db import IMMessageDB
 logger = logging.getLogger(__name__)
 
 
+def _guess_mime_type(filename: str) -> str:
+    """Guess MIME type from file extension."""
+    ext = os.path.splitext(filename)[1].lower()
+    mime_types = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".gif": "image/gif", ".heic": "image/heic", ".webp": "image/webp",
+        ".tiff": "image/tiff", ".bmp": "image/bmp",
+        ".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/mp4",
+        ".avi": "video/avi", ".mkv": "video/x-matroska",
+        ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav",
+        ".aac": "audio/aac", ".ogg": "audio/ogg",
+        ".pdf": "application/pdf",
+    }
+    return mime_types.get(ext, "")
+
+
 def _find_free_port() -> int:
     """Find a free port on localhost."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -135,6 +151,9 @@ class _BrowseHandler(http.server.BaseHTTPRequestHandler):
                                 # URL-encode the path
                                 encoded_path = quote(att["filename"], safe="")
                                 att["path"] = f"/attachment?path={encoded_path}"
+                                # Infer mime_type from extension if missing
+                                if not att.get("mime_type"):
+                                    att["mime_type"] = _guess_mime_type(att["filename"])
 
                     chat_data = {
                         "chat": chat_meta,
