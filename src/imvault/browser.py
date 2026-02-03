@@ -30,7 +30,7 @@ def _read_template(name: str) -> str:
     return resources.files("imvault.templates").joinpath(name).read_text(encoding="utf-8")
 
 
-class _BrowseHandler(http.server.BaseHTTPHandler):
+class _BrowseHandler(http.server.BaseHTTPRequestHandler):
     """HTTP handler that serves chat data directly from the database."""
 
     def __init__(self, request, client_address, server, *, db: IMMessageDB, chats: list):
