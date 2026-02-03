@@ -71,53 +71,69 @@ def view_archive(archive_path: str, password: str) -> None:
     file_size = os.path.getsize(archive_path)
     print(f"Loading archive ({_format_size(file_size)})...")
 
-    # Read file
-    print("  Reading encrypted data...", end="", flush=True)
-    with open(archive_path, "rb") as f:
-        data = f.read()
-    print(" done")
+    data = None
+    tar_gz = None
 
-    # Decrypt
-    print("  Decrypting...", end="", flush=True)
-    tar_gz = decrypt_archive(data, password)
-    # Free encrypted data memory
-    del data
-    print(" done")
-
-    with tempfile.TemporaryDirectory(prefix="imvault_") as tmpdir:
-        # Extract tar.gz to temp directory
-        print("  Extracting files...", end="", flush=True)
-        with tarfile.open(fileobj=BytesIO(tar_gz), mode="r:gz") as tf:
-            members = tf.getmembers()
-            total = len(members)
-            for i, member in enumerate(members):
-                if not _validate_tar_member(member, tmpdir):
-                    logger.warning("Skipping suspicious tar member: %s", member.name)
-                    continue
-                tf.extract(member, tmpdir)
-                # Show progress every 100 files or at the end
-                if (i + 1) % 100 == 0 or i + 1 == total:
-                    pct = (i + 1) * 100 // total
-                    print(f"\r  Extracting files... {i + 1}/{total} ({pct}%)", end="", flush=True)
-        # Free decrypted data memory
-        del tar_gz
+    try:
+        # Read file
+        print("  Reading encrypted data...", end="", flush=True)
+        with open(archive_path, "rb") as f:
+            data = f.read()
         print(" done")
 
-        port = _find_free_port()
-        handler = partial(_QuietHandler, directory=tmpdir)
+        # Decrypt
+        print("  Decrypting...", end="", flush=True)
+        tar_gz = decrypt_archive(data, password)
+        # Free encrypted data memory
+        del data
+        data = None
+        print(" done")
 
-        server = http.server.HTTPServer(("127.0.0.1", port), handler)
+        with tempfile.TemporaryDirectory(prefix="imvault_") as tmpdir:
+            # Extract tar.gz to temp directory
+            print("  Extracting files...", end="", flush=True)
+            with tarfile.open(fileobj=BytesIO(tar_gz), mode="r:gz") as tf:
+                members = tf.getmembers()
+                total = len(members)
+                for i, member in enumerate(members):
+                    if not _validate_tar_member(member, tmpdir):
+                        logger.warning("Skipping suspicious tar member: %s", member.name)
+                        continue
+                    tf.extract(member, tmpdir)
+                    # Show progress every 100 files or at the end
+                    if (i + 1) % 100 == 0 or i + 1 == total:
+                        pct = (i + 1) * 100 // total
+                        print(f"\r  Extracting files... {i + 1}/{total} ({pct}%)", end="", flush=True)
+            # Free decrypted data memory
+            del tar_gz
+            tar_gz = None
+            print(" done")
 
-        url = f"http://127.0.0.1:{port}/index.html"
-        print(f"\nServing archive at {url}")
-        print("Press Ctrl+C to stop.")
+            port = _find_free_port()
+            handler = partial(_QuietHandler, directory=tmpdir)
 
-        # Open browser in a thread so we can start serving immediately
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+            server = http.server.HTTPServer(("127.0.0.1", port), handler)
 
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            print("\nShutting down.")
-        finally:
-            server.shutdown()
+            url = f"http://127.0.0.1:{port}/index.html"
+            print(f"\nServing archive at {url}")
+            print("Press Ctrl+C to stop.")
+
+            # Open browser in a thread so we can start serving immediately
+            threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.shutdown()
+                print("\nShutting down.")
+
+    except KeyboardInterrupt:
+        print("\n\nCancelled.")
+        # Clean up any allocated memory
+        if data is not None:
+            del data
+        if tar_gz is not None:
+            del tar_gz
+        sys.exit(0)
