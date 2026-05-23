@@ -123,6 +123,58 @@ The viewer includes:
 - **Attachments view** — grid gallery of all photos and videos
 - **Dark mode** — toggle or follows system preference
 
+### Merge archives
+
+Combine overlapping `.imv` archives into one deduplicated archive:
+
+```bash
+imvault merge old1.imv old2.imv old3.imv -o combined.imv
+```
+
+Messages are deduplicated by iMessage GUID, chats are matched without using local `chat.db` row IDs, and attachments from retained messages are copied into the new archive. If the input archives use different passwords:
+
+```bash
+imvault merge old1.imv old2.imv --separate-passwords -o combined.imv
+```
+
+Merge existing archives with the current Messages database without creating a temporary export:
+
+```bash
+imvault merge old1.imv old2.imv --with-current --all -o combined.imv
+```
+
+Or include only selected current conversations:
+
+```bash
+imvault merge old1.imv --with-current --chat 42 --chat 57 -o combined.imv
+```
+
+### Inspect archives
+
+Show message and attachment counts for one or more `.imv` archives:
+
+```bash
+imvault inspect archive.imv
+```
+
+Per-chat breakdown:
+
+```bash
+imvault inspect archive.imv --by-chat
+```
+
+Verify that every attachment in one archive is also present in another (useful for confirming a merge preserved everything):
+
+```bash
+imvault inspect source.imv merged.imv --compare-attachments
+```
+
+If the archives use different passwords:
+
+```bash
+imvault inspect old1.imv old2.imv --separate-passwords
+```
+
 ### Using a backup or recovered database
 
 You can export from a chat.db file in a different location (e.g., recovered from a backup):

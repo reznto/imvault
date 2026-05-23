@@ -137,6 +137,16 @@ body {
   background: var(--header-bg);
   flex-shrink: 0;
 }
+.nav-toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--header-bg);
+  align-items: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
 .main-search {
   flex: 1;
   padding: 8px 12px;
@@ -146,6 +156,22 @@ body {
   color: var(--text-primary);
   font-size: 15px;
   outline: none;
+}
+.date-input, .month-select {
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.month-select { min-width: 150px; }
+.nav-spacer { flex: 1; }
+.search-status {
+  color: var(--text-secondary);
+  font-size: 12px;
+  min-width: 72px;
+  text-align: center;
 }
 .btn {
   padding: 6px 12px;
@@ -165,6 +191,20 @@ body {
   overflow-x: hidden;
   padding: 8px 16px 16px;
   background: var(--chat-bg);
+}
+.current-date-pill {
+  position: sticky;
+  top: 8px;
+  z-index: 20;
+  width: fit-content;
+  margin: 0 auto 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--header-bg);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+  backdrop-filter: blur(20px);
 }
 .empty-state {
   display: flex;
@@ -265,6 +305,15 @@ body {
   align-items: center;
   gap: 2px;
 }
+.search-highlight {
+  background: #ffd60a;
+  color: #000;
+  border-radius: 2px;
+}
+.message-row.search-active .bubble {
+  outline: 2px solid #ffd60a;
+  outline-offset: 2px;
+}
 .hidden { display: none !important; }
 
 /* Gallery view */
@@ -359,14 +408,29 @@ body {
   </div>
   <div class="main-toolbar">
     <input type="text" class="main-search" id="msgSearch" placeholder="Search messages...">
+    <button class="btn" id="searchPrev">Prev</button>
+    <button class="btn" id="searchNext">Next</button>
+    <span class="search-status" id="searchStatus"></span>
     <button class="btn" id="viewToggle">Attachments</button>
+  </div>
+  <div class="nav-toolbar hidden" id="navToolbar">
+    <button class="btn" id="firstBtn">First</button>
+    <button class="btn" id="latestBtn">Latest</button>
+    <input type="date" class="date-input" id="dateJump">
+    <select class="month-select" id="monthJump"></select>
+    <span class="nav-spacer"></span>
+    <span class="search-status" id="rangeStatus"></span>
   </div>
   <div class="chat-container" id="chatContainer">
     <div class="empty-state" id="emptyState">Select a conversation from the sidebar</div>
+    <div class="current-date-pill hidden" id="currentDatePill"></div>
     <div class="load-earlier hidden" id="loadEarlier">
       <button onclick="loadEarlierMessages()">Load Earlier Messages</button>
     </div>
     <div id="messages"></div>
+    <div class="load-earlier hidden" id="loadLater">
+      <button onclick="loadLaterMessages()">Load Later Messages</button>
+    </div>
   </div>
   <div class="gallery-container hidden" id="galleryContainer">
     <div class="gallery-grid" id="galleryGrid"></div>
@@ -374,7 +438,7 @@ body {
 </div>
 
 <script>
-const CHUNK = 200;
+const CHUNK = 400;
 const REACTION_EMOJI = {
   "Loved": "\u2764\ufe0f", "Liked": "\ud83d\udc4d", "Disliked": "\ud83d\udc4e",
   "Laughed": "\ud83d\ude02", "Emphasized": "\u203c\ufe0f", "Questioned": "\u2753"
@@ -384,6 +448,10 @@ let manifest = [];
 let currentChat = null;
 let allMessages = [];
 let displayedStart = 0;
+let displayedEnd = 0;
+let monthIndex = [];
+let searchMatches = [];
+let activeSearchMatch = -1;
 
 async function init() {
   const resp = await fetch("manifest.json");
@@ -424,17 +492,17 @@ async function loadChat(chat) {
   document.getElementById("chatContainer").classList.remove("hidden");
   document.getElementById("galleryContainer").classList.add("hidden");
   document.getElementById("msgSearch").classList.remove("hidden");
+  document.getElementById("navToolbar").classList.remove("hidden");
+  document.getElementById("msgSearch").value = "";
 
   const resp = await fetch(chat.data_path);
   currentChat = await resp.json();
   allMessages = currentChat.messages || [];
-  displayedStart = Math.max(0, allMessages.length - CHUNK);
-  renderMessages();
-  if (displayedStart > 0) {
-    document.getElementById("loadEarlier").classList.remove("hidden");
-  } else {
-    document.getElementById("loadEarlier").classList.add("hidden");
-  }
+  searchMatches = [];
+  activeSearchMatch = -1;
+  buildDateIndex();
+  setupNavigation();
+  setMessageWindow(Math.max(0, allMessages.length - CHUNK), allMessages.length);
   scrollToBottom();
 }
 
@@ -444,27 +512,53 @@ function scrollToBottom() {
 }
 
 function loadEarlierMessages() {
-  displayedStart = Math.max(0, displayedStart - CHUNK);
+  setMessageWindow(Math.max(0, displayedStart - CHUNK), displayedStart);
+  document.getElementById("chatContainer").scrollTop = 0;
+}
+
+function loadLaterMessages() {
+  setMessageWindow(displayedEnd, Math.min(allMessages.length, displayedEnd + CHUNK));
+  document.getElementById("chatContainer").scrollTop = 0;
+}
+
+function setMessageWindow(start, end) {
+  displayedStart = Math.max(0, start);
+  displayedEnd = Math.min(allMessages.length, Math.max(end, displayedStart + 1));
   renderMessages();
-  if (displayedStart === 0) document.getElementById("loadEarlier").classList.add("hidden");
+  updateWindowControls();
+  updateSearchStatus();
+}
+
+function jumpToMessage(index, align = "center") {
+  if (index < 0 || index >= allMessages.length) return;
+  const half = Math.floor(CHUNK / 2);
+  const start = Math.max(0, Math.min(index - half, allMessages.length - CHUNK));
+  const end = Math.min(allMessages.length, start + CHUNK);
+  setMessageWindow(start, end);
+  requestAnimationFrame(() => {
+    const row = document.querySelector(`.message-row[data-index="${index}"]`);
+    if (row) row.scrollIntoView({ block: align, behavior: "smooth" });
+  });
 }
 
 function renderMessages() {
   const container = document.getElementById("messages");
   if (!currentChat) return;
-  const subset = allMessages.slice(displayedStart);
+  const subset = allMessages.slice(displayedStart, displayedEnd);
   const chatMeta = currentChat.chat || {};
   const isGroup = (chatMeta.style === 43) || (chatMeta.participants && chatMeta.participants.length > 1);
   let html = "";
   let lastDate = "";
-  for (const msg of subset) {
+  subset.forEach((msg, offset) => {
+    const index = displayedStart + offset;
     const dateStr = msg.date ? msg.date.substring(0, 10) : "";
     if (dateStr && dateStr !== lastDate) {
       html += `<div class="date-header">${formatDate(dateStr)}</div>`;
       lastDate = dateStr;
     }
     const dir = msg.is_from_me ? "sent" : "received";
-    html += `<div class="message-row ${dir}" data-text="${escapeAttr(msg.text || "")}">`;
+    const activeClass = searchMatches[activeSearchMatch] === index ? " search-active" : "";
+    html += `<div class="message-row ${dir}${activeClass}" data-index="${index}" data-date="${escapeAttr(dateStr)}" data-text="${escapeAttr(msg.text || "")}">`;
     if (!msg.is_from_me && isGroup) {
       html += `<div style="width:100%"><div class="sender-label">${escapeHtml(msg.sender)}</div>`;
     } else if (!msg.is_from_me) {
@@ -473,7 +567,7 @@ function renderMessages() {
       html += `<div style="width:100%;display:flex;flex-direction:column;align-items:flex-end">`;
     }
     html += `<div class="bubble">`;
-    if (msg.text) html += escapeHtml(msg.text);
+    if (msg.text) html += renderMessageText(msg.text);
     for (const att of (msg.attachments || [])) {
       html += renderAttachment(att);
     }
@@ -495,8 +589,21 @@ function renderMessages() {
       html += `<div class="timestamp">${formatTime(msg.date)}</div>`;
     }
     html += `</div></div>`;
-  }
+  });
   container.innerHTML = html;
+  installBrokenAttachmentHandlers(container);
+  updateCurrentDate();
+}
+
+function renderMessageText(text) {
+  const q = document.getElementById("msgSearch").value.toLowerCase().trim();
+  if (!q) return escapeHtml(text);
+  const lower = text.toLowerCase();
+  const pos = lower.indexOf(q);
+  if (pos === -1) return escapeHtml(text);
+  return escapeHtml(text.slice(0, pos)) +
+    `<span class="search-highlight">${escapeHtml(text.slice(pos, pos + q.length))}</span>` +
+    escapeHtml(text.slice(pos + q.length));
 }
 
 function renderAttachment(att) {
@@ -513,6 +620,15 @@ function renderAttachment(att) {
     return `<div class="attachment"><audio src="${escapeAttr(path)}" controls preload="metadata"></audio></div>`;
   }
   return `<div class="attachment"><a href="${escapeAttr(path)}" target="_blank">${escapeHtml(name)}</a></div>`;
+}
+
+function installBrokenAttachmentHandlers(root) {
+  root.querySelectorAll(".attachment img, .attachment video, .attachment audio").forEach(media => {
+    media.addEventListener("error", () => {
+      const wrapper = media.closest(".attachment");
+      if (wrapper) wrapper.remove();
+    });
+  });
 }
 
 function formatDate(iso) {
@@ -548,18 +664,113 @@ document.getElementById("sidebarSearch").addEventListener("input", function() {
   });
 });
 
-// Message search
-document.getElementById("msgSearch").addEventListener("input", function() {
-  const q = this.value.toLowerCase().trim();
-  const rows = document.querySelectorAll(".message-row");
-  if (!q) {
-    rows.forEach(r => r.classList.remove("hidden"));
+function buildDateIndex() {
+  monthIndex = [];
+  const seenMonths = new Set();
+  for (let i = 0; i < allMessages.length; i++) {
+    const date = allMessages[i].date || "";
+    if (!date) continue;
+    const month = date.substring(0, 7);
+    if (!seenMonths.has(month)) {
+      seenMonths.add(month);
+      monthIndex.push({ month, index: i });
+    }
+  }
+}
+
+function setupNavigation() {
+  const monthSelect = document.getElementById("monthJump");
+  monthSelect.innerHTML = '<option value="">Jump to month...</option>';
+  for (const item of monthIndex) {
+    const option = document.createElement("option");
+    option.value = item.index;
+    option.textContent = formatMonth(item.month);
+    monthSelect.appendChild(option);
+  }
+  const firstDate = allMessages.find(m => m.date)?.date;
+  const lastDate = [...allMessages].reverse().find(m => m.date)?.date;
+  const dateJump = document.getElementById("dateJump");
+  if (firstDate && lastDate) {
+    dateJump.min = firstDate.substring(0, 10);
+    dateJump.max = lastDate.substring(0, 10);
+  } else {
+    dateJump.removeAttribute("min");
+    dateJump.removeAttribute("max");
+  }
+  dateJump.value = "";
+}
+
+function updateWindowControls() {
+  document.getElementById("loadEarlier").classList.toggle("hidden", displayedStart === 0);
+  document.getElementById("loadLater").classList.toggle("hidden", displayedEnd >= allMessages.length);
+  document.getElementById("rangeStatus").textContent = allMessages.length
+    ? `${displayedStart + 1}-${displayedEnd} of ${allMessages.length}`
+    : "";
+}
+
+function updateCurrentDate() {
+  const pill = document.getElementById("currentDatePill");
+  const msg = allMessages[displayedStart];
+  if (!msg || !msg.date) {
+    pill.classList.add("hidden");
     return;
   }
-  rows.forEach(r => {
-    const text = (r.dataset.text || "").toLowerCase();
-    r.classList.toggle("hidden", !text.includes(q));
-  });
+  pill.textContent = formatMonth(msg.date.substring(0, 7));
+  pill.classList.remove("hidden");
+}
+
+function jumpToDate(dateValue) {
+  if (!dateValue) return;
+  const index = allMessages.findIndex(msg => (msg.date || "").substring(0, 10) >= dateValue);
+  jumpToMessage(index === -1 ? allMessages.length - 1 : index, "start");
+}
+
+function formatMonth(month) {
+  try {
+    const d = new Date(`${month}-01T00:00:00`);
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "long" });
+  } catch { return month; }
+}
+
+function updateSearch() {
+  const q = document.getElementById("msgSearch").value.toLowerCase().trim();
+  searchMatches = [];
+  activeSearchMatch = -1;
+  if (q) {
+    allMessages.forEach((msg, index) => {
+      if ((msg.text || "").toLowerCase().includes(q)) searchMatches.push(index);
+    });
+    if (searchMatches.length > 0) activeSearchMatch = 0;
+  }
+  updateSearchStatus();
+  if (activeSearchMatch >= 0) {
+    jumpToMessage(searchMatches[activeSearchMatch]);
+  } else {
+    renderMessages();
+  }
+}
+
+function updateSearchStatus() {
+  const status = document.getElementById("searchStatus");
+  status.textContent = searchMatches.length
+    ? `${activeSearchMatch + 1}/${searchMatches.length}`
+    : (document.getElementById("msgSearch").value.trim() ? "0" : "");
+}
+
+function stepSearch(delta) {
+  if (!searchMatches.length) return;
+  activeSearchMatch = (activeSearchMatch + delta + searchMatches.length) % searchMatches.length;
+  jumpToMessage(searchMatches[activeSearchMatch]);
+}
+
+document.getElementById("msgSearch").addEventListener("input", updateSearch);
+document.getElementById("searchPrev").addEventListener("click", () => stepSearch(-1));
+document.getElementById("searchNext").addEventListener("click", () => stepSearch(1));
+document.getElementById("firstBtn").addEventListener("click", () => jumpToMessage(0, "start"));
+document.getElementById("latestBtn").addEventListener("click", () => jumpToMessage(allMessages.length - 1, "end"));
+document.getElementById("dateJump").addEventListener("change", e => jumpToDate(e.target.value));
+document.getElementById("monthJump").addEventListener("change", e => {
+  if (e.target.value !== "") jumpToMessage(Number(e.target.value), "start");
 });
 
 // Dark mode
@@ -623,6 +834,19 @@ function renderGallery() {
   grid.querySelectorAll(".gallery-item").forEach(item => {
     item.addEventListener("click", () => openLightbox(item.dataset.path, item.dataset.mime));
   });
+  installGalleryMediaHandlers(grid);
+}
+
+function installGalleryMediaHandlers(grid) {
+  grid.querySelectorAll(".gallery-item img, .gallery-item video").forEach(media => {
+    media.addEventListener("error", () => {
+      const item = media.closest(".gallery-item");
+      if (item) item.remove();
+      if (!grid.querySelector(".gallery-item")) {
+        grid.innerHTML = '<div class="gallery-empty">No renderable photos or videos</div>';
+      }
+    });
+  });
 }
 
 function openLightbox(path, mime) {
@@ -646,6 +870,7 @@ function toggleView() {
   document.getElementById("chatContainer").classList.toggle("hidden", viewMode === "attachments");
   document.getElementById("galleryContainer").classList.toggle("hidden", viewMode === "messages");
   document.getElementById("msgSearch").classList.toggle("hidden", viewMode === "attachments");
+  document.getElementById("navToolbar").classList.toggle("hidden", viewMode === "attachments");
   if (viewMode === "attachments") renderGallery();
 }
 

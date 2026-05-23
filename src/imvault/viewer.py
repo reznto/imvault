@@ -10,6 +10,7 @@ import tempfile
 import threading
 import webbrowser
 from functools import partial
+from importlib import resources
 from io import BytesIO
 
 from .crypto import decrypt_archive
@@ -42,6 +43,27 @@ def _format_size(size: int) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TB"
+
+
+def _read_template(name: str) -> str:
+    """Read a bundled HTML reader template."""
+    return resources.files("imvault.templates").joinpath(name).read_text(encoding="utf-8")
+
+
+def _refresh_reader_template(tmpdir: str) -> None:
+    """Replace archived reader HTML with the current bundled template."""
+    manifest_path = os.path.join(tmpdir, "manifest.json")
+    data_path = os.path.join(tmpdir, "data.json")
+    if os.path.exists(manifest_path):
+        template_name = "reader_multi.html"
+    elif os.path.exists(data_path):
+        template_name = "reader_single.html"
+    else:
+        return
+
+    index_path = os.path.join(tmpdir, "index.html")
+    with open(index_path, "w", encoding="utf-8") as f:
+        f.write(_read_template(template_name))
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -114,6 +136,8 @@ def view_archive(archive_path: str, password: str) -> None:
             del tar_gz
             tar_gz = None
             print(" done")
+
+            _refresh_reader_template(tmpdir)
 
             port = _find_free_port()
             handler = partial(_QuietHandler, directory=tmpdir)
