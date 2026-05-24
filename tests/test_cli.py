@@ -1,7 +1,11 @@
 """Tests for imvault.cli — Click command interface."""
 
-from unittest.mock import patch
+import json
+import os
 import sqlite3
+import subprocess
+import sys
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -288,3 +292,314 @@ class TestInspectCommand:
         )
         assert result.exit_code != 0
         assert "requires exactly two archives" in result.output
+
+
+def _piped_password_fd(*passwords: str) -> int:
+    """Create a pipe, write the given passwords (one per line), return the read fd."""
+    read_fd, write_fd = os.pipe()
+    payload = "".join(f"{p}\n" for p in passwords).encode()
+    os.write(write_fd, payload)
+    os.close(write_fd)
+    return read_fd
+
+
+class TestListJson:
+    def test_list_json_emits_array(self, runner, mock_chat_db):
+        result = runner.invoke(cli, ["--db-path", mock_chat_db, "list", "--json"])
+        assert result.exit_code == 0, result.output
+        # Find the JSON line (filter out any other output)
+        json_line = next(
+            line for line in result.output.splitlines() if line.startswith("[")
+        )
+        chats = json.loads(json_line)
+        assert isinstance(chats, list)
+        assert len(chats) == 2
+        for chat in chats:
+            assert set(chat.keys()) == {
+                "chat_id",
+                "display_name",
+                "participant_count",
+                "message_count",
+                "last_message_at",
+            }
+            assert isinstance(chat["chat_id"], int)
+            assert isinstance(chat["participant_count"], int)
+            assert isinstance(chat["message_count"], int)
+
+        names = {c["display_name"] for c in chats}
+        assert "Alice" in names
+        assert "Group Chat" in names
+
+    def test_list_json_db_not_found(self, runner, tmp_path):
+        result = runner.invoke(
+            cli, ["--db-path", str(tmp_path / "nope.db"), "list", "--json"]
+        )
+        assert result.exit_code != 0
+
+
+class TestInspectJson:
+    def test_inspect_json_emits_object(self, runner, mock_chat_db, tmp_path):
+        archive = str(tmp_path / "archive.imv")
+
+        result = runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", archive],
+            input="testpass\ntestpass\n",
+        )
+        assert result.exit_code == 0
+
+        result = runner.invoke(
+            cli,
+            ["inspect", archive, "--json"],
+            input="testpass\n",
+        )
+        assert result.exit_code == 0, result.output
+        json_line = next(
+            line for line in result.output.splitlines() if line.startswith("{")
+        )
+        payload = json.loads(json_line)
+        assert "archives" in payload
+        assert len(payload["archives"]) == 1
+        info = payload["archives"][0]
+        assert info["chat_count"] == 2
+        assert info["messages"] > 0
+        # by_chat data is always present in info["chats"]
+        assert isinstance(info["chats"], list)
+        assert len(info["chats"]) == 2
+
+    def test_inspect_json_compare_attachments(self, runner, mock_chat_db, tmp_path):
+        source = str(tmp_path / "src.imv")
+        target = str(tmp_path / "tgt.imv")
+
+        runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", source],
+            input="testpass\ntestpass\n",
+        )
+        runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", target],
+            input="testpass\ntestpass\n",
+        )
+
+        result = runner.invoke(
+            cli,
+            ["inspect", source, target, "--compare-attachments", "--json"],
+            input="testpass\n",
+        )
+        assert result.exit_code == 0, result.output
+        json_line = next(
+            line for line in result.output.splitlines() if line.startswith("{")
+        )
+        payload = json.loads(json_line)
+        assert "compare_attachments" in payload
+        cmp = payload["compare_attachments"]
+        assert cmp["source"] == source
+        assert cmp["target"] == target
+        assert "missing_from_target" in cmp
+
+
+class TestExportProgressJson:
+    def test_progress_json_emits_events_on_stderr(self, runner, mock_chat_db, tmp_path):
+        output = str(tmp_path / "p.imv")
+        result = runner.invoke(
+            cli,
+            [
+                "--db-path",
+                mock_chat_db,
+                "export",
+                "--all",
+                "-o",
+                output,
+                "--progress-json",
+            ],
+            input="testpass\ntestpass\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        events = []
+        for line in result.stderr.splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            events.append(json.loads(line))
+
+        # We have 2 chats in the mock, so expect 2 chat_started + 2 chat_done at minimum.
+        kinds = [e["event"] for e in events]
+        assert kinds.count("chat_started") == 2
+        assert kinds.count("chat_done") == 2
+
+        # Each event has the required fields.
+        for event in events:
+            assert set(event.keys()) >= {"event", "chat_id", "processed", "total"}
+            assert event["total"] == 2
+
+
+class TestPasswordFd:
+    def test_export_reads_password_from_fd(self, runner, mock_chat_db, tmp_path):
+        output = str(tmp_path / "fd.imv")
+        fd = _piped_password_fd("fdpass")
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "--db-path",
+                    mock_chat_db,
+                    "export",
+                    "--all",
+                    "-o",
+                    output,
+                    "--password-fd",
+                    str(fd),
+                ],
+            )
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        assert result.exit_code == 0, result.output
+        assert os.path.exists(output)
+        assert "Archive saved" in result.output
+
+    def test_export_password_fd_never_on_argv(
+        self, runner, mock_chat_db, tmp_path
+    ):
+        """Sanity check: confirm we can drive export without putting the
+        password into argv. The password lives only in the pipe."""
+        output = str(tmp_path / "fd2.imv")
+        fd = _piped_password_fd("super-secret-pw")
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "--db-path",
+                    mock_chat_db,
+                    "export",
+                    "--all",
+                    "-o",
+                    output,
+                    "--password-fd",
+                    str(fd),
+                ],
+            )
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        assert result.exit_code == 0
+        # The password must not appear in any CLI-emitted output either.
+        assert "super-secret-pw" not in result.output
+
+    def test_inspect_reads_password_from_fd(self, runner, mock_chat_db, tmp_path):
+        archive = str(tmp_path / "fd_inspect.imv")
+
+        result = runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", archive],
+            input="testpass\ntestpass\n",
+        )
+        assert result.exit_code == 0
+
+        fd = _piped_password_fd("testpass")
+        try:
+            result = runner.invoke(
+                cli,
+                ["inspect", archive, "--password-fd", str(fd)],
+            )
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        assert result.exit_code == 0, result.output
+        assert "Chats:" in result.output
+
+    def test_view_reads_password_from_fd(self, runner, mock_chat_db, tmp_path):
+        archive = str(tmp_path / "fd_view.imv")
+        runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", archive],
+            input="testpass\ntestpass\n",
+        )
+
+        fd = _piped_password_fd("testpass")
+        try:
+            with patch("imvault.viewer.view_archive") as mock_view:
+                result = runner.invoke(
+                    cli,
+                    ["view", archive, "--password-fd", str(fd)],
+                )
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        assert result.exit_code == 0, result.output
+        assert mock_view.call_args.args[1] == "testpass"
+
+    def test_merge_reads_passwords_from_fd(self, runner, mock_chat_db, tmp_path):
+        archive_one = str(tmp_path / "m1.imv")
+        archive_two = str(tmp_path / "m2.imv")
+        merged = str(tmp_path / "m_out.imv")
+
+        runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--chat", "1", "-o", archive_one],
+            input="srcpass\nsrcpass\n",
+        )
+        runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", archive_two],
+            input="srcpass\nsrcpass\n",
+        )
+
+        # Shared input password (one line) + output password (one line).
+        fd = _piped_password_fd("srcpass", "newpass")
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "merge",
+                    archive_one,
+                    archive_two,
+                    "-o",
+                    merged,
+                    "--password-fd",
+                    str(fd),
+                ],
+            )
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        assert result.exit_code == 0, result.output
+        assert "Merged archive saved" in result.output
+
+    def test_password_fd_empty_stream_errors(self, runner, mock_chat_db, tmp_path):
+        # Close the write end immediately — no password available.
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "--db-path",
+                    mock_chat_db,
+                    "export",
+                    "--all",
+                    "-o",
+                    str(tmp_path / "empty.imv"),
+                    "--password-fd",
+                    str(read_fd),
+                ],
+            )
+        finally:
+            try:
+                os.close(read_fd)
+            except OSError:
+                pass
+        assert result.exit_code != 0
+        assert "no password available" in result.output
