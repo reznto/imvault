@@ -1,5 +1,6 @@
 """Click CLI for imvault: list, export, view commands."""
 
+import json
 import logging
 import os
 import sys
@@ -52,9 +53,60 @@ def _make_resolver():
         return None
 
 
+def _password_source(fd: int | None):
+    """Return a callable that produces the next password.
+
+    If fd is None, prompts interactively via click. Otherwise reads one
+    password per line from the given file descriptor — the caller pipes
+    passwords in via os.pipe() so they never appear on argv.
+    """
+    if fd is None:
+        def _interactive(prompt_text: str, confirm: bool = False) -> str:
+            return click.prompt(
+                prompt_text,
+                hide_input=True,
+                confirmation_prompt=confirm,
+            )
+        return _interactive
+
+    try:
+        dup_fd = os.dup(fd)
+    except OSError as e:
+        raise click.ClickException(f"--password-fd {fd}: {e}") from e
+    stream = os.fdopen(dup_fd, "r", encoding="utf-8")
+
+    def _from_fd(prompt_text: str, confirm: bool = False) -> str:
+        line = stream.readline()
+        if not line:
+            raise click.ClickException(
+                "--password-fd: no password available (stream closed/empty)"
+            )
+        return line.rstrip("\r\n")
+
+    return _from_fd
+
+
+def _emit_event(event: str, *, chat_id: int | None, processed: int, total: int) -> None:
+    """Write a single JSON event line to stderr for --progress-json consumers."""
+    payload = {
+        "event": event,
+        "chat_id": chat_id,
+        "processed": processed,
+        "total": total,
+    }
+    sys.stderr.write(json.dumps(payload) + "\n")
+    sys.stderr.flush()
+
+
 @cli.command("list")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit a JSON array of chats on stdout (for GUI/scripting consumers).",
+)
 @click.pass_context
-def list_chats(ctx: click.Context) -> None:
+def list_chats(ctx: click.Context, as_json: bool) -> None:
     """List all iMessage conversations."""
     from .db import IMMessageDB
 
@@ -63,11 +115,28 @@ def list_chats(ctx: click.Context) -> None:
     try:
         db = IMMessageDB(db_path, resolver=resolver)
     except (FileNotFoundError, PermissionError) as e:
-        click.echo(f"Error: {e}", err=True)
+        if as_json:
+            click.echo(json.dumps({"error": str(e)}), err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
     with db:
         chats = db.list_chats()
+
+    if as_json:
+        payload = [
+            {
+                "chat_id": c["chat_id"],
+                "display_name": c["display_name"],
+                "participant_count": len(c["participants"]),
+                "message_count": c["message_count"],
+                "last_message_at": c["last_date"],
+            }
+            for c in chats
+        ]
+        click.echo(json.dumps(payload))
+        return
 
     if not chats:
         click.echo("No conversations found.")
@@ -101,12 +170,27 @@ def list_chats(ctx: click.Context) -> None:
     help="Output file path (default: imvault_export.imv)",
     type=click.Path(),
 )
+@click.option(
+    "--password-fd",
+    "password_fd",
+    type=int,
+    default=None,
+    help="Read archive password from this file descriptor (no confirmation prompt).",
+)
+@click.option(
+    "--progress-json",
+    "progress_json",
+    is_flag=True,
+    help="Emit one JSON event per line on stderr while exporting.",
+)
 @click.pass_context
 def export_chats(
     ctx: click.Context,
     export_all: bool,
     chat_ids: tuple[int, ...],
     output_path: str | None,
+    password_fd: int | None,
+    progress_json: bool,
 ) -> None:
     """Export iMessage conversations to an encrypted .imv archive."""
     from .archive import ArchiveBuilder
@@ -119,6 +203,8 @@ def export_chats(
     except (FileNotFoundError, PermissionError) as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+    get_password = _password_source(password_fd)
 
     with db:
         chats = db.list_chats()
@@ -151,18 +237,37 @@ def export_chats(
         if output_path is None:
             output_path = "imvault_export.imv"
 
-        password = click.prompt("Enter archive password", hide_input=True, confirmation_prompt=True)
+        password = get_password(
+            "Enter archive password", confirm=password_fd is None
+        )
 
         if not password:
             click.echo("Error: Password cannot be empty.", err=True)
             sys.exit(1)
 
-        click.echo(f"Exporting {len(selected_ids)} conversation(s)...")
-
-        with click.progressbar(length=len(selected_ids), label="Exporting conversations") as bar:
-            builder = ArchiveBuilder(db, password, output_path, selected_ids,
-                                     progress=lambda cur, tot: bar.update(1))
+        if progress_json:
+            click.echo(f"Exporting {len(selected_ids)} conversation(s)...")
+            builder = ArchiveBuilder(
+                db,
+                password,
+                output_path,
+                selected_ids,
+                event_callback=_emit_event,
+            )
             result_path = builder.build()
+        else:
+            click.echo(f"Exporting {len(selected_ids)} conversation(s)...")
+            with click.progressbar(
+                length=len(selected_ids), label="Exporting conversations"
+            ) as bar:
+                builder = ArchiveBuilder(
+                    db,
+                    password,
+                    output_path,
+                    selected_ids,
+                    progress=lambda cur, tot: bar.update(1),
+                )
+                result_path = builder.build()
         click.echo("Encrypting archive...")
 
     size = os.path.getsize(result_path)
@@ -191,6 +296,17 @@ def export_chats(
 )
 @click.option("--all", "include_all", is_flag=True, help="Include all current conversations")
 @click.option("--chat", "chat_ids", multiple=True, type=int, help="Current chat ID(s) to include")
+@click.option(
+    "--password-fd",
+    "password_fd",
+    type=int,
+    default=None,
+    help=(
+        "Read passwords from this file descriptor, one per line. Order: each "
+        "input archive password (one if shared, one per archive if "
+        "--separate-passwords), then the output archive password."
+    ),
+)
 @click.pass_context
 def merge_archives(
     ctx: click.Context,
@@ -200,6 +316,7 @@ def merge_archives(
     with_current: bool,
     include_all: bool,
     chat_ids: tuple[int, ...],
+    password_fd: int | None,
 ) -> None:
     """Merge encrypted .imv archives into one deduplicated archive."""
     from .archive import MergedArchiveBuilder
@@ -227,28 +344,27 @@ def merge_archives(
     if output_path is None:
         output_path = "imvault_merged.imv"
 
+    get_password = _password_source(password_fd)
+
     archive_inputs = []
     if separate_passwords:
         for archive in archives:
-            input_password = click.prompt(
-                f"Enter password for {os.path.basename(archive)}",
-                hide_input=True,
+            input_password = get_password(
+                f"Enter password for {os.path.basename(archive)}"
             )
             if not input_password:
                 click.echo("Error: Input password cannot be empty.", err=True)
                 sys.exit(1)
             archive_inputs.append((archive, input_password))
     else:
-        input_password = click.prompt("Enter input archive password", hide_input=True)
+        input_password = get_password("Enter input archive password")
         if not input_password:
             click.echo("Error: Input password cannot be empty.", err=True)
             sys.exit(1)
         archive_inputs = [(archive, input_password) for archive in archives]
 
-    output_password = click.prompt(
-        "Enter new archive password",
-        hide_input=True,
-        confirmation_prompt=True,
+    output_password = get_password(
+        "Enter new archive password", confirm=password_fd is None
     )
     if not output_password:
         click.echo("Error: Output password cannot be empty.", err=True)
@@ -339,11 +455,29 @@ def merge_archives(
     is_flag=True,
     help="Check that all attachments in the first archive are present in the second",
 )
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit results as a JSON object on stdout (suppresses human output).",
+)
+@click.option(
+    "--password-fd",
+    "password_fd",
+    type=int,
+    default=None,
+    help=(
+        "Read passwords from this file descriptor. With --separate-passwords, "
+        "expect one password per line per archive; otherwise a single password."
+    ),
+)
 def inspect_archives(
     archives: tuple[str, ...],
     separate_passwords: bool,
     by_chat: bool,
     compare_attachments: bool,
+    as_json: bool,
+    password_fd: int | None,
 ) -> None:
     """Inspect encrypted .imv archive message and attachment counts."""
     from .archive import archive_attachment_digests
@@ -357,26 +491,31 @@ def inspect_archives(
         click.echo("Error: --compare-attachments requires exactly two archives.", err=True)
         sys.exit(1)
 
+    get_password = _password_source(password_fd)
+
     archive_inputs = []
     if separate_passwords:
         for archive in archives:
-            password = click.prompt(
-                f"Enter password for {os.path.basename(archive)}",
-                hide_input=True,
-            )
+            password = get_password(f"Enter password for {os.path.basename(archive)}")
             archive_inputs.append((archive, password))
     else:
-        password = click.prompt("Enter archive password", hide_input=True)
+        password = get_password("Enter archive password")
         archive_inputs = [(archive, password) for archive in archives]
 
-    archive_infos = {}
+    archive_infos: dict[str, dict] = {}
     for archive, password in archive_inputs:
         try:
             info = inspect_archive(archive, password)
         except ValueError as e:
-            click.echo(f"Error: {e}", err=True)
+            if as_json:
+                click.echo(json.dumps({"error": str(e), "path": archive}), err=True)
+            else:
+                click.echo(f"Error: {e}", err=True)
             sys.exit(1)
         archive_infos[archive] = info
+
+        if as_json:
+            continue
 
         click.echo(f"\n{archive}")
         click.echo(f"  Chats: {info['chat_count']}")
@@ -396,48 +535,81 @@ def inspect_archives(
                     f"{chat['attachment_missing']} missing"
                 )
 
+    comparison = None
     if compare_attachments:
         source_archive, source_password = archive_inputs[0]
         target_archive, target_password = archive_inputs[1]
         try:
             source_total = archive_infos[source_archive]["unique_attachment_files"]
             target_total = archive_infos[target_archive]["unique_attachment_files"]
-            click.echo("\nHashing source attachments...")
-            with click.progressbar(length=source_total, label="Source attachments") as bar:
-                source = archive_attachment_digests(
-                    source_archive,
-                    source_password,
-                    progress=lambda cur, total: bar.update(1),
-                )
-            click.echo("Hashing target attachments...")
-            with click.progressbar(length=target_total, label="Target attachments") as bar:
-                target = archive_attachment_digests(
-                    target_archive,
-                    target_password,
-                    progress=lambda cur, total: bar.update(1),
-                )
+            if as_json:
+                source = archive_attachment_digests(source_archive, source_password)
+                target = archive_attachment_digests(target_archive, target_password)
+            else:
+                click.echo("\nHashing source attachments...")
+                with click.progressbar(length=source_total, label="Source attachments") as bar:
+                    source = archive_attachment_digests(
+                        source_archive,
+                        source_password,
+                        progress=lambda cur, total: bar.update(1),
+                    )
+                click.echo("Hashing target attachments...")
+                with click.progressbar(length=target_total, label="Target attachments") as bar:
+                    target = archive_attachment_digests(
+                        target_archive,
+                        target_password,
+                        progress=lambda cur, total: bar.update(1),
+                    )
         except ValueError as e:
-            click.echo(f"Error: {e}", err=True)
+            if as_json:
+                click.echo(json.dumps({"error": str(e)}), err=True)
+            else:
+                click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
         missing = source - target
-        click.echo("\nAttachment containment")
-        click.echo(f"  Source: {source_archive}")
-        click.echo(f"  Target: {target_archive}")
-        click.echo(f"  Source unique attachments: {len(source)}")
-        click.echo(f"  Target unique attachments: {len(target)}")
-        click.echo(f"  Source attachments present in target: {len(source) - len(missing)}")
-        click.echo(f"  Missing from target: {len(missing)}")
+        comparison = {
+            "source": source_archive,
+            "target": target_archive,
+            "source_unique_attachments": len(source),
+            "target_unique_attachments": len(target),
+            "source_present_in_target": len(source) - len(missing),
+            "missing_from_target": len(missing),
+        }
+        if not as_json:
+            click.echo("\nAttachment containment")
+            click.echo(f"  Source: {source_archive}")
+            click.echo(f"  Target: {target_archive}")
+            click.echo(f"  Source unique attachments: {len(source)}")
+            click.echo(f"  Target unique attachments: {len(target)}")
+            click.echo(
+                f"  Source attachments present in target: {len(source) - len(missing)}"
+            )
+            click.echo(f"  Missing from target: {len(missing)}")
+
+    if as_json:
+        out = {"archives": [archive_infos[a] for a, _ in archive_inputs]}
+        if comparison is not None:
+            out["compare_attachments"] = comparison
+        click.echo(json.dumps(out))
 
 
 @cli.command("view")
 @click.argument("archive", type=click.Path(exists=True))
+@click.option(
+    "--password-fd",
+    "password_fd",
+    type=int,
+    default=None,
+    help="Read archive password from this file descriptor.",
+)
 @click.pass_context
-def view_archive_cmd(ctx: click.Context, archive: str) -> None:
+def view_archive_cmd(ctx: click.Context, archive: str, password_fd: int | None) -> None:
     """Decrypt and view an .imv archive in the browser."""
     from .viewer import view_archive
 
-    password = click.prompt("Enter archive password", hide_input=True)
+    get_password = _password_source(password_fd)
+    password = get_password("Enter archive password")
 
     try:
         view_archive(archive, password)

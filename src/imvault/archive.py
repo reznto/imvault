@@ -93,9 +93,16 @@ def _copy_attachment(
 
 
 def _prepare_messages(
-    messages: list[dict[str, Any]], attachment_prefix: str, tf: tarfile.TarFile
+    messages: list[dict[str, Any]],
+    attachment_prefix: str,
+    tf: tarfile.TarFile,
+    on_attachment=None,
 ) -> list[dict[str, Any]]:
-    """Process messages: copy attachments into tar, return serializable list."""
+    """Process messages: copy attachments into tar, return serializable list.
+
+    If on_attachment is given, it's called with no args after each attachment
+    is written. Used by ArchiveBuilder to emit progress events.
+    """
     output = []
     for msg in messages:
         entry: dict[str, Any] = {
@@ -116,6 +123,8 @@ def _prepare_messages(
                     "mime_type": att.get("mime_type"),
                     "transfer_name": att.get("transfer_name"),
                 })
+                if on_attachment is not None:
+                    on_attachment()
         output.append(entry)
     return output
 
@@ -130,12 +139,24 @@ class ArchiveBuilder:
         output_path: str,
         chat_ids: list[int],
         progress=None,
+        event_callback=None,
     ):
         self.db = db
         self.password = password
         self.output_path = output_path
         self.chat_ids = chat_ids
         self.progress = progress  # callable(current: int, total: int) or None
+        # event_callback(event: str, *, chat_id: int|None, processed: int, total: int)
+        self.event_callback = event_callback
+
+    def _emit(self, event: str, *, chat_id: int | None, processed: int) -> None:
+        if self.event_callback is not None:
+            self.event_callback(
+                event,
+                chat_id=chat_id,
+                processed=processed,
+                total=len(self.chat_ids),
+            )
 
     def build(self) -> str:
         """Build the archive and write to output_path. Returns the path."""
@@ -158,10 +179,19 @@ class ArchiveBuilder:
         chats = self.db.list_chats()
         chat_meta = next((c for c in chats if c["chat_id"] == chat_id), None)
 
+        self._emit("chat_started", chat_id=chat_id, processed=0)
+
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
             messages = self.db.get_messages(chat_id)
-            processed = _prepare_messages(messages, "attachments", tf)
+            on_attachment = (
+                (lambda: self._emit("attachment", chat_id=chat_id, processed=0))
+                if self.event_callback
+                else None
+            )
+            processed = _prepare_messages(
+                messages, "attachments", tf, on_attachment=on_attachment
+            )
 
             data = {
                 "chat": chat_meta or {"chat_id": chat_id},
@@ -174,6 +204,7 @@ class ArchiveBuilder:
 
         if self.progress:
             self.progress(1, 1)
+        self._emit("chat_done", chat_id=chat_id, processed=1)
 
         return buf.getvalue()
 
@@ -187,10 +218,21 @@ class ArchiveBuilder:
             manifest = []
 
             for i, chat_id in enumerate(self.chat_ids):
+                self._emit("chat_started", chat_id=chat_id, processed=i)
+
                 chat_meta = chat_map.get(chat_id, {"chat_id": chat_id})
                 messages = self.db.get_messages(chat_id)
                 prefix = f"chats/{chat_id}/attachments"
-                processed = _prepare_messages(messages, prefix, tf)
+                on_attachment = (
+                    (lambda cid=chat_id, idx=i: self._emit(
+                        "attachment", chat_id=cid, processed=idx
+                    ))
+                    if self.event_callback
+                    else None
+                )
+                processed = _prepare_messages(
+                    messages, prefix, tf, on_attachment=on_attachment
+                )
 
                 chat_data = {
                     "chat": chat_meta,
@@ -211,6 +253,7 @@ class ArchiveBuilder:
 
                 if self.progress:
                     self.progress(i + 1, len(self.chat_ids))
+                self._emit("chat_done", chat_id=chat_id, processed=i + 1)
 
             _add_string_to_tar(
                 tf, "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
