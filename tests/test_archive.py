@@ -325,7 +325,7 @@ class TestMergedArchive:
         )
         builder = MergedArchiveBuilder([], "pw", str(tmp_path / "unused.imv"))
 
-        tar_gz = builder._build_tar([{
+        merged_chats = [{
             "chat": {"chat_id": 1, "display_name": "Alice"},
             "messages": [{
                 "rowid": 1,
@@ -337,9 +337,15 @@ class TestMergedArchive:
                 "reactions": [],
                 "_attachment_refs": [ref, ref],
             }],
-        }])
+        }]
 
-        with tarfile.open(fileobj=io.BytesIO(tar_gz), mode="r:gz") as tf:
+        # 0.4.1: _build_tar -> _populate_tar which writes into a caller-owned
+        # tarfile instead of returning bytes (streaming-friendly).
+        tar_path = tmp_path / "out.tar.gz"
+        with tarfile.open(str(tar_path), mode="w:gz") as tf:
+            builder._populate_tar(tf, merged_chats)
+
+        with tarfile.open(str(tar_path), mode="r:gz") as tf:
             chat_data = json.loads(tf.extractfile("data.json").read())
             attachment_members = [name for name in tf.getnames() if name.startswith("attachments/")]
 

@@ -6,6 +6,7 @@ from imvault.crypto import (
     decrypt_archive,
     decrypt_archive_to_file,
     encrypt_archive,
+    encrypt_archive_from_file,
     HEADER_SIZE,
 )
 from imvault.constants import MAGIC, FORMAT_VERSION
@@ -247,3 +248,97 @@ class TestStreamingDecrypt:
             decrypt_archive_to_file(
                 str(encrypted_path), str(output_path), "pw"
             )
+
+
+class TestStreamingEncrypt:
+    """`encrypt_archive_from_file` should produce output that the regular
+    `decrypt_archive` can read identically — the streaming write side is a
+    drop-in for the in-memory `encrypt_archive`."""
+
+    def test_round_trip_via_streaming_encrypt(self, tmp_path):
+        from imvault.constants import CHUNK_SIZE
+
+        plaintext = b"streaming-encrypt round trip " * 1000  # ~30 KB
+        password = "encrypt-stream-test"
+
+        input_path = tmp_path / "plain.tar.gz"
+        input_path.write_bytes(plaintext)
+        output_path = tmp_path / "encrypted.imv"
+
+        encrypt_archive_from_file(str(input_path), str(output_path), password)
+
+        # The in-memory decrypt should recover the original plaintext exactly.
+        decrypted = decrypt_archive(output_path.read_bytes(), password)
+        assert decrypted == plaintext
+
+    def test_multi_chunk_round_trip(self, tmp_path):
+        from imvault.constants import CHUNK_SIZE
+
+        plaintext = b"X" * (CHUNK_SIZE * 3 + 4242)  # 3 full chunks + partial
+        password = "multi-chunk-stream"
+
+        input_path = tmp_path / "plain.tar.gz"
+        input_path.write_bytes(plaintext)
+        output_path = tmp_path / "encrypted.imv"
+
+        encrypt_archive_from_file(str(input_path), str(output_path), password)
+
+        decrypted = decrypt_archive(output_path.read_bytes(), password)
+        assert decrypted == plaintext
+
+    def test_empty_input(self, tmp_path):
+        input_path = tmp_path / "empty.tar.gz"
+        input_path.write_bytes(b"")
+        output_path = tmp_path / "encrypted.imv"
+
+        events: list[tuple[int, int]] = []
+        encrypt_archive_from_file(
+            str(input_path),
+            str(output_path),
+            "pw",
+            progress=lambda done, total: events.append((done, total)),
+        )
+
+        decrypted = decrypt_archive(output_path.read_bytes(), "pw")
+        assert decrypted == b""
+        assert events == [(0, 0)]
+
+    def test_progress_callback_per_chunk(self, tmp_path):
+        from imvault.constants import CHUNK_SIZE
+
+        plaintext = b"Y" * (CHUNK_SIZE * 4)  # exactly 4 chunks
+        password = "encrypt-progress"
+
+        input_path = tmp_path / "plain.tar.gz"
+        input_path.write_bytes(plaintext)
+        output_path = tmp_path / "encrypted.imv"
+
+        events: list[tuple[int, int]] = []
+        encrypt_archive_from_file(
+            str(input_path),
+            str(output_path),
+            password,
+            progress=lambda done, total: events.append((done, total)),
+        )
+
+        assert len(events) == 4
+        assert all(total == 4 for _, total in events)
+        assert [done for done, _ in events] == [1, 2, 3, 4]
+
+    def test_output_decodable_by_streaming_decrypt(self, tmp_path):
+        """The two streaming halves should be fully symmetric — encrypt via
+        streaming, then decrypt via streaming."""
+        from imvault.constants import CHUNK_SIZE
+
+        plaintext = b"symmetric stream test " * 5000
+        password = "symmetric"
+
+        plain_path = tmp_path / "plain.tar.gz"
+        plain_path.write_bytes(plaintext)
+        encrypted_path = tmp_path / "out.imv"
+        recovered_path = tmp_path / "recovered.tar.gz"
+
+        encrypt_archive_from_file(str(plain_path), str(encrypted_path), password)
+        decrypt_archive_to_file(str(encrypted_path), str(recovered_path), password)
+
+        assert recovered_path.read_bytes() == plaintext
