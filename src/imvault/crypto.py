@@ -190,3 +190,104 @@ def decrypt_archive(data: bytes, password: str) -> bytes:
         ) from e
 
     return plaintext
+
+
+def decrypt_archive_to_file(
+    input_path: str,
+    output_path: str,
+    password: str,
+    progress=None,
+) -> None:
+    """Stream-decrypt an .imv file directly to ``output_path``.
+
+    Memory usage is bounded by the chunk size (one chunk decrypted at a time)
+    instead of by the archive size, so this is the right path for archives
+    that don't fit comfortably in RAM. v1 archives still hold the full
+    ciphertext in memory because the v1 format is a single AEAD block.
+
+    Args:
+        input_path: path to the encrypted .imv archive.
+        output_path: path to write the decrypted tar.gz payload.
+        password: the password used to encrypt the archive.
+        progress: optional callable invoked as ``progress(chunks_done,
+            chunks_total)`` after each decrypted chunk. For v1 archives it
+            is called once with (1, 1).
+
+    Raises:
+        ValueError: If the file is not a valid .imv archive.
+        ValueError: If the password is wrong or data is tampered.
+    """
+    with open(input_path, "rb") as fin:
+        header = fin.read(HEADER_SIZE)
+        if len(header) < HEADER_SIZE:
+            raise ValueError("File is too small to be a valid .imv archive.")
+
+        magic = header[: len(MAGIC)]
+        if magic != MAGIC:
+            raise ValueError(
+                f"Not an imvault archive (expected magic {MAGIC!r}, got {magic!r})."
+            )
+
+        offset = len(MAGIC)
+        (version,) = struct.unpack("<H", header[offset : offset + 2])
+        offset += 2
+
+        if version not in (1, 2):
+            raise ValueError(
+                f"Unsupported archive version {version} (expected 1 or 2)."
+            )
+
+        salt = header[offset : offset + SALT_LENGTH]
+        offset += SALT_LENGTH
+        base_nonce = header[offset : offset + NONCE_LENGTH]
+        offset += NONCE_LENGTH
+        assert offset == HEADER_SIZE
+
+        key = derive_key(password, salt)
+        aesgcm = AESGCM(key)
+
+        try:
+            if version == 1:
+                ciphertext = fin.read()
+                plaintext = aesgcm.decrypt(base_nonce, ciphertext, header)
+                with open(output_path, "wb") as fout:
+                    fout.write(plaintext)
+                if progress is not None:
+                    progress(1, 1)
+                return
+
+            # v2: chunked encryption — read, decrypt, write one chunk at a time.
+            chunk_count_bytes = fin.read(4)
+            if len(chunk_count_bytes) < 4:
+                raise ValueError("Truncated archive (missing chunk count).")
+            (chunk_count,) = struct.unpack("<I", chunk_count_bytes)
+
+            with open(output_path, "wb") as fout:
+                for chunk_index in range(chunk_count):
+                    chunk_len_bytes = fin.read(4)
+                    if len(chunk_len_bytes) < 4:
+                        raise ValueError(
+                            f"Truncated archive at chunk {chunk_index}."
+                        )
+                    (chunk_len,) = struct.unpack("<I", chunk_len_bytes)
+
+                    chunk_ciphertext = fin.read(chunk_len)
+                    if len(chunk_ciphertext) < chunk_len:
+                        raise ValueError(
+                            f"Truncated archive at chunk {chunk_index}."
+                        )
+
+                    chunk_nonce = _increment_nonce(base_nonce, chunk_index)
+                    aad = header + struct.pack("<I", chunk_index)
+                    chunk_plaintext = aesgcm.decrypt(
+                        chunk_nonce, chunk_ciphertext, aad
+                    )
+                    fout.write(chunk_plaintext)
+
+                    if progress is not None:
+                        progress(chunk_index + 1, chunk_count)
+
+        except InvalidTag as e:
+            raise ValueError(
+                "Decryption failed — wrong password or corrupted archive."
+            ) from e

@@ -1,6 +1,7 @@
 """Decrypt and view .imv archives in a local browser."""
 
 import http.server
+import json
 import logging
 import os
 import socket
@@ -11,9 +12,8 @@ import threading
 import webbrowser
 from functools import partial
 from importlib import resources
-from io import BytesIO
 
-from .crypto import decrypt_archive
+from .crypto import decrypt_archive_to_file
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,13 @@ def _refresh_reader_template(tmpdir: str) -> None:
         f.write(_read_template(template_name))
 
 
+def _emit_view_event(event: str, **fields) -> None:
+    """Write a single JSON event line to stderr for --progress-json consumers."""
+    payload = {"event": event, **fields}
+    sys.stderr.write(json.dumps(payload) + "\n")
+    sys.stderr.flush()
+
+
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP handler that suppresses request logs and connection errors."""
 
@@ -91,65 +98,113 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
             pass
 
 
-def view_archive(archive_path: str, password: str) -> None:
-    """Decrypt an .imv archive, extract to temp dir, and serve via HTTP."""
+def view_archive(
+    archive_path: str,
+    password: str,
+    *,
+    no_browser: bool = False,
+    progress_json: bool = False,
+) -> None:
+    """Decrypt an .imv archive, extract to temp dir, and serve via HTTP.
+
+    Args:
+        archive_path: path to the .imv archive.
+        password: archive password.
+        no_browser: if True, don't auto-launch the system browser. Useful when
+            a GUI consumer is embedding the served URL in its own webview.
+        progress_json: if True, emit machine-readable JSON event lines on stderr
+            (one per line: {"event": "...", "processed": N, "total": M, ...})
+            instead of the human-readable progress text. The final ``ready``
+            event also carries ``url`` and ``port``.
+    """
     if not os.path.isfile(archive_path):
         raise FileNotFoundError(f"Archive not found: {archive_path}")
 
     file_size = os.path.getsize(archive_path)
-    print(f"Loading archive ({_format_size(file_size)})...")
-
-    data = None
-    tar_gz = None
+    if not progress_json:
+        print(f"Loading archive ({_format_size(file_size)})...")
 
     try:
-        # Read file
-        print("  Reading encrypted data...", end="", flush=True)
-        with open(archive_path, "rb") as f:
-            data = f.read()
-        print(" done")
-
-        # Decrypt
-        print("  Decrypting...", end="", flush=True)
-        tar_gz = decrypt_archive(data, password)
-        # Free encrypted data memory
-        del data
-        data = None
-        print(" done")
-
         with tempfile.TemporaryDirectory(prefix="imvault_") as tmpdir:
-            # Extract tar.gz to temp directory
-            print("  Extracting files...", end="", flush=True)
-            with tarfile.open(fileobj=BytesIO(tar_gz), mode="r:gz") as tf:
+            # Stream-decrypt directly to a temp file inside tmpdir. Memory is
+            # bounded by CHUNK_SIZE instead of by the archive size.
+            tar_gz_path = os.path.join(tmpdir, "_decrypted.tar.gz")
+
+            def _on_decrypt_progress(done: int, total: int) -> None:
+                if progress_json:
+                    _emit_view_event(
+                        "decrypt_progress", processed=done, total=total
+                    )
+                elif (done % 50 == 0 or done == total) and total > 0:
+                    pct = done * 100 // total
+                    print(
+                        f"\r  Decrypting... {done}/{total} ({pct}%)",
+                        end="",
+                        flush=True,
+                    )
+
+            if not progress_json:
+                print("  Decrypting...", end="", flush=True)
+            decrypt_archive_to_file(
+                archive_path, tar_gz_path, password, progress=_on_decrypt_progress
+            )
+            if not progress_json:
+                print(" done")
+
+            # Extract.
+            if not progress_json:
+                print("  Extracting files...", end="", flush=True)
+            with tarfile.open(tar_gz_path, mode="r:gz") as tf:
                 members = tf.getmembers()
                 total = len(members)
                 for i, member in enumerate(members):
                     if not _validate_tar_member(member, tmpdir):
-                        logger.warning("Skipping suspicious tar member: %s", member.name)
+                        logger.warning(
+                            "Skipping suspicious tar member: %s", member.name
+                        )
                         continue
                     tf.extract(member, tmpdir)
-                    # Show progress every 100 files or at the end
-                    if (i + 1) % 100 == 0 or i + 1 == total:
+                    if progress_json:
+                        # Emit every ~50 files (keeps the stream paced without
+                        # spamming for tiny archives).
+                        if (i + 1) % 50 == 0 or i + 1 == total:
+                            _emit_view_event(
+                                "extract_progress",
+                                processed=i + 1,
+                                total=total,
+                            )
+                    elif (i + 1) % 100 == 0 or i + 1 == total:
                         pct = (i + 1) * 100 // total
-                        print(f"\r  Extracting files... {i + 1}/{total} ({pct}%)", end="", flush=True)
-            # Free decrypted data memory
-            del tar_gz
-            tar_gz = None
-            print(" done")
+                        print(
+                            f"\r  Extracting files... {i + 1}/{total} ({pct}%)",
+                            end="",
+                            flush=True,
+                        )
+            if not progress_json:
+                print(" done")
+
+            # Free disk by removing the decrypted .tar.gz now that it's extracted.
+            try:
+                os.remove(tar_gz_path)
+            except OSError:
+                pass
 
             _refresh_reader_template(tmpdir)
 
             port = _find_free_port()
             handler = partial(_QuietHandler, directory=tmpdir)
-
             server = http.server.HTTPServer(("127.0.0.1", port), handler)
-
             url = f"http://127.0.0.1:{port}/index.html"
-            print(f"\nServing archive at {url}")
-            print("Press Ctrl+C to stop.")
 
-            # Open browser in a thread so we can start serving immediately
-            threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+            if progress_json:
+                _emit_view_event("ready", url=url, port=port)
+            else:
+                print(f"\nServing archive at {url}")
+                print("Press Ctrl+C to stop.")
+
+            if not no_browser:
+                # Open browser in a thread so we can start serving immediately.
+                threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 
             try:
                 server.serve_forever()
@@ -157,13 +212,10 @@ def view_archive(archive_path: str, password: str) -> None:
                 pass
             finally:
                 server.shutdown()
-                print("\nShutting down.")
+                if not progress_json:
+                    print("\nShutting down.")
 
     except KeyboardInterrupt:
-        print("\n\nCancelled.")
-        # Clean up any allocated memory
-        if data is not None:
-            del data
-        if tar_gz is not None:
-            del tar_gz
+        if not progress_json:
+            print("\n\nCancelled.")
         sys.exit(0)
