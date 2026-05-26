@@ -489,10 +489,22 @@ class TestExportProgressJson:
         assert kinds.count("chat_started") == 2
         assert kinds.count("chat_done") == 2
 
-        # Each event has the required fields.
+        # 0.4.1+: an encrypt_progress event arrives after the last chat_done
+        # while the tar.gz is being stream-encrypted. At least one is emitted
+        # for non-empty exports.
+        assert any(k == "encrypt_progress" for k in kinds)
+
+        # Each event has the required fields. Chat events' total = number of
+        # chats; encrypt events' total = number of ciphertext chunks (which
+        # for the mock is small but >=1).
         for event in events:
             assert set(event.keys()) >= {"event", "chat_id", "processed", "total"}
-            assert event["total"] == 2
+            if event["event"] in ("chat_started", "chat_done", "attachment"):
+                assert event["total"] == 2
+            elif event["event"] == "encrypt_progress":
+                assert event["chat_id"] is None
+                assert event["total"] >= 1
+                assert 0 <= event["processed"] <= event["total"]
 
 
 class TestPasswordFd:

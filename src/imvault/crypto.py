@@ -113,6 +113,69 @@ def encrypt_archive(plaintext: bytes, password: str) -> bytes:
     return bytes(output)
 
 
+def encrypt_archive_from_file(
+    input_path: str,
+    output_path: str,
+    password: str,
+    progress=None,
+) -> None:
+    """Stream-encrypt a tar.gz at ``input_path`` into a v2-format .imv archive
+    at ``output_path``.
+
+    Memory bounded by ``CHUNK_SIZE``; only one plaintext + ciphertext chunk
+    is held at a time. The output is bit-for-bit decryptable by both
+    ``decrypt_archive`` and ``decrypt_archive_to_file`` — same v2 format
+    that ``encrypt_archive`` (the in-memory version) produces.
+
+    Args:
+        input_path: path to the plaintext tar.gz payload.
+        output_path: path to write the encrypted .imv archive.
+        password: password used to derive the key.
+        progress: optional callable ``progress(chunks_done, chunks_total)``
+            invoked after each chunk is encrypted and written. For an empty
+            input it is called once with (0, 0).
+    """
+    input_size = os.path.getsize(input_path)
+    chunk_count = (input_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+
+    salt = os.urandom(SALT_LENGTH)
+    base_nonce = os.urandom(NONCE_LENGTH)
+    key = derive_key(password, salt)
+
+    header = bytearray()
+    header.extend(MAGIC)
+    header.extend(struct.pack("<H", FORMAT_VERSION))
+    header.extend(salt)
+    header.extend(base_nonce)
+    header = bytes(header)
+    assert len(header) == HEADER_SIZE
+
+    aesgcm = AESGCM(key)
+
+    with open(input_path, "rb") as fin, open(output_path, "wb") as fout:
+        fout.write(header)
+        fout.write(struct.pack("<I", chunk_count))
+
+        if chunk_count == 0:
+            if progress is not None:
+                progress(0, 0)
+            return
+
+        chunk_index = 0
+        while True:
+            chunk_data = fin.read(CHUNK_SIZE)
+            if not chunk_data:
+                break
+            chunk_nonce = _increment_nonce(base_nonce, chunk_index)
+            aad = header + struct.pack("<I", chunk_index)
+            ciphertext = aesgcm.encrypt(chunk_nonce, chunk_data, aad)
+            fout.write(struct.pack("<I", len(ciphertext)))
+            fout.write(ciphertext)
+            chunk_index += 1
+            if progress is not None:
+                progress(chunk_index, chunk_count)
+
+
 def decrypt_archive(data: bytes, password: str) -> bytes:
     """Decrypt an .imv file back to the tar.gz payload.
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "imvault"
-version = "0.4.0"
+version = "0.4.1"
 description = "Browse, search, and archive iMessage conversations from macOS"
 readme = "README.md"
 license = "MIT"

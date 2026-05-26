@@ -5,12 +5,13 @@ import json
 import logging
 import os
 import tarfile
+import tempfile
 import hashlib
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any
 
-from .crypto import decrypt_archive, encrypt_archive
+from .crypto import decrypt_archive, encrypt_archive, encrypt_archive_from_file
 from .db import IMMessageDB
 
 logger = logging.getLogger(__name__)
@@ -149,120 +150,152 @@ class ArchiveBuilder:
         # event_callback(event: str, *, chat_id: int|None, processed: int, total: int)
         self.event_callback = event_callback
 
-    def _emit(self, event: str, *, chat_id: int | None, processed: int) -> None:
+    def _emit(
+        self,
+        event: str,
+        *,
+        chat_id: int | None,
+        processed: int,
+        total: int | None = None,
+    ) -> None:
         if self.event_callback is not None:
             self.event_callback(
                 event,
                 chat_id=chat_id,
                 processed=processed,
-                total=len(self.chat_ids),
+                total=total if total is not None else len(self.chat_ids),
             )
 
     def build(self) -> str:
-        """Build the archive and write to output_path. Returns the path."""
-        if len(self.chat_ids) == 1:
-            tar_bytes = self._build_single()
-        else:
-            tar_bytes = self._build_multi()
+        """Build the archive and stream-encrypt it to ``output_path``.
 
-        encrypted = encrypt_archive(tar_bytes, self.password)
+        Layout: the tar.gz payload is written to a temp file alongside
+        ``output_path`` (so the rename is on-volume), then stream-encrypted
+        chunk-by-chunk into ``output_path``. Memory bounded by CHUNK_SIZE
+        regardless of payload size.
+        """
+        output_dir = os.path.dirname(os.path.abspath(self.output_path)) or "."
+        fd, tar_path = tempfile.mkstemp(
+            prefix=".imvault_tar_",
+            suffix=".tar.gz",
+            dir=output_dir,
+        )
+        os.close(fd)
+        try:
+            with tarfile.open(tar_path, mode="w:gz") as tf:
+                if len(self.chat_ids) == 1:
+                    self._populate_single(tf)
+                else:
+                    self._populate_multi(tf)
 
-        with open(self.output_path, "wb") as f:
-            f.write(encrypted)
+            def _on_encrypt(done: int, total: int) -> None:
+                self._emit(
+                    "encrypt_progress",
+                    chat_id=None,
+                    processed=done,
+                    total=total,
+                )
 
-        logger.info("Archive written to %s (%d bytes)", self.output_path, len(encrypted))
+            encrypt_archive_from_file(
+                tar_path,
+                self.output_path,
+                self.password,
+                progress=_on_encrypt,
+            )
+        finally:
+            try:
+                os.remove(tar_path)
+            except OSError:
+                pass
+
+        final_size = os.path.getsize(self.output_path)
+        logger.info(
+            "Archive written to %s (%d bytes)", self.output_path, final_size
+        )
         return self.output_path
 
-    def _build_single(self) -> bytes:
-        """Build a single-chat tar.gz archive in memory."""
+    def _populate_single(self, tf: tarfile.TarFile) -> None:
+        """Populate a single-chat tar.gz into the given open tarfile."""
         chat_id = self.chat_ids[0]
         chats = self.db.list_chats()
         chat_meta = next((c for c in chats if c["chat_id"] == chat_id), None)
 
         self._emit("chat_started", chat_id=chat_id, processed=0)
 
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            messages = self.db.get_messages(chat_id)
-            on_attachment = (
-                (lambda: self._emit("attachment", chat_id=chat_id, processed=0))
-                if self.event_callback
-                else None
-            )
-            processed = _prepare_messages(
-                messages, "attachments", tf, on_attachment=on_attachment
-            )
+        messages = self.db.get_messages(chat_id)
+        on_attachment = (
+            (lambda: self._emit("attachment", chat_id=chat_id, processed=0))
+            if self.event_callback
+            else None
+        )
+        processed = _prepare_messages(
+            messages, "attachments", tf, on_attachment=on_attachment
+        )
 
-            data = {
-                "chat": chat_meta or {"chat_id": chat_id},
-                "messages": processed,
-            }
-            _add_string_to_tar(tf, "data.json", json.dumps(data, ensure_ascii=False, indent=2))
+        data = {
+            "chat": chat_meta or {"chat_id": chat_id},
+            "messages": processed,
+        }
+        _add_string_to_tar(tf, "data.json", json.dumps(data, ensure_ascii=False, indent=2))
 
-            html = _read_template("reader_single.html")
-            _add_string_to_tar(tf, "index.html", html)
+        html = _read_template("reader_single.html")
+        _add_string_to_tar(tf, "index.html", html)
 
         if self.progress:
             self.progress(1, 1)
         self._emit("chat_done", chat_id=chat_id, processed=1)
 
-        return buf.getvalue()
-
-    def _build_multi(self) -> bytes:
-        """Build a multi-chat tar.gz archive in memory."""
+    def _populate_multi(self, tf: tarfile.TarFile) -> None:
+        """Populate a multi-chat tar.gz into the given open tarfile."""
         all_chats = self.db.list_chats()
         chat_map = {c["chat_id"]: c for c in all_chats}
 
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            manifest = []
+        manifest = []
 
-            for i, chat_id in enumerate(self.chat_ids):
-                self._emit("chat_started", chat_id=chat_id, processed=i)
+        for i, chat_id in enumerate(self.chat_ids):
+            self._emit("chat_started", chat_id=chat_id, processed=i)
 
-                chat_meta = chat_map.get(chat_id, {"chat_id": chat_id})
-                messages = self.db.get_messages(chat_id)
-                prefix = f"chats/{chat_id}/attachments"
-                on_attachment = (
-                    (lambda cid=chat_id, idx=i: self._emit(
-                        "attachment", chat_id=cid, processed=idx
-                    ))
-                    if self.event_callback
-                    else None
-                )
-                processed = _prepare_messages(
-                    messages, prefix, tf, on_attachment=on_attachment
-                )
-
-                chat_data = {
-                    "chat": chat_meta,
-                    "messages": processed,
-                }
-                data_path = f"chats/{chat_id}/data.json"
-                _add_string_to_tar(
-                    tf, data_path, json.dumps(chat_data, ensure_ascii=False, indent=2)
-                )
-
-                manifest.append({
-                    "chat_id": chat_id,
-                    "display_name": chat_meta.get("display_name", str(chat_id)),
-                    "message_count": chat_meta.get("message_count", len(processed)),
-                    "last_date": chat_meta.get("last_date"),
-                    "data_path": data_path,
-                })
-
-                if self.progress:
-                    self.progress(i + 1, len(self.chat_ids))
-                self._emit("chat_done", chat_id=chat_id, processed=i + 1)
-
-            _add_string_to_tar(
-                tf, "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
+            chat_meta = chat_map.get(chat_id, {"chat_id": chat_id})
+            messages = self.db.get_messages(chat_id)
+            prefix = f"chats/{chat_id}/attachments"
+            on_attachment = (
+                (lambda cid=chat_id, idx=i: self._emit(
+                    "attachment", chat_id=cid, processed=idx
+                ))
+                if self.event_callback
+                else None
+            )
+            processed = _prepare_messages(
+                messages, prefix, tf, on_attachment=on_attachment
             )
 
-            html = _read_template("reader_multi.html")
-            _add_string_to_tar(tf, "index.html", html)
+            chat_data = {
+                "chat": chat_meta,
+                "messages": processed,
+            }
+            data_path = f"chats/{chat_id}/data.json"
+            _add_string_to_tar(
+                tf, data_path, json.dumps(chat_data, ensure_ascii=False, indent=2)
+            )
 
-        return buf.getvalue()
+            manifest.append({
+                "chat_id": chat_id,
+                "display_name": chat_meta.get("display_name", str(chat_id)),
+                "message_count": chat_meta.get("message_count", len(processed)),
+                "last_date": chat_meta.get("last_date"),
+                "data_path": data_path,
+            })
+
+            if self.progress:
+                self.progress(i + 1, len(self.chat_ids))
+            self._emit("chat_done", chat_id=chat_id, processed=i + 1)
+
+        _add_string_to_tar(
+            tf, "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
+        )
+
+        html = _read_template("reader_multi.html")
+        _add_string_to_tar(tf, "index.html", html)
 
 
 @dataclass
@@ -633,17 +666,40 @@ class MergedArchiveBuilder:
                 f"Building archive payload ({self.stats['messages']} messages across "
                 f"{self.stats['chats']} chats)..."
             )
-        tar_bytes = self._build_tar(merged_chats)
-        if self.status:
-            self.status(f"Encrypting archive payload ({len(tar_bytes)} bytes)...")
-        encrypted = encrypt_archive(tar_bytes, self.password)
 
-        if self.status:
-            self.status(f"Writing encrypted archive ({len(encrypted)} bytes)...")
-        with open(self.output_path, "wb") as f:
-            f.write(encrypted)
+        output_dir = os.path.dirname(os.path.abspath(self.output_path)) or "."
+        fd, tar_path = tempfile.mkstemp(
+            prefix=".imvault_tar_",
+            suffix=".tar.gz",
+            dir=output_dir,
+        )
+        os.close(fd)
+        try:
+            with tarfile.open(tar_path, mode="w:gz") as tf:
+                self._populate_tar(tf, merged_chats)
 
-        logger.info("Merged archive written to %s (%d bytes)", self.output_path, len(encrypted))
+            tar_size = os.path.getsize(tar_path)
+            if self.status:
+                self.status(f"Encrypting archive payload ({tar_size} bytes)...")
+
+            encrypt_archive_from_file(
+                tar_path,
+                self.output_path,
+                self.password,
+                progress=None,
+            )
+        finally:
+            try:
+                os.remove(tar_path)
+            except OSError:
+                pass
+
+        final_size = os.path.getsize(self.output_path)
+        if self.status:
+            self.status(f"Wrote encrypted archive ({final_size} bytes).")
+        logger.info(
+            "Merged archive written to %s (%d bytes)", self.output_path, final_size
+        )
         return self.output_path
 
     def _merge_inputs(self) -> list[dict[str, Any]]:
@@ -711,41 +767,41 @@ class MergedArchiveBuilder:
             else:
                 messages_by_guid[guid] = message
 
-    def _build_tar(self, merged_chats: list[dict[str, Any]]) -> bytes:
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            if len(merged_chats) == 1:
-                chat_data = self._write_chat(tf, merged_chats[0], "attachments")
+    def _populate_tar(
+        self,
+        tf: tarfile.TarFile,
+        merged_chats: list[dict[str, Any]],
+    ) -> None:
+        if len(merged_chats) == 1:
+            chat_data = self._write_chat(tf, merged_chats[0], "attachments")
+            _add_string_to_tar(
+                tf, "data.json", json.dumps(chat_data, ensure_ascii=False, indent=2)
+            )
+            _add_string_to_tar(tf, "index.html", _read_template("reader_single.html"))
+        else:
+            manifest = []
+            for index, merged_chat in enumerate(merged_chats, start=1):
+                chat = dict(merged_chat["chat"])
+                chat["chat_id"] = index
+                merged_chat = {**merged_chat, "chat": chat}
+                prefix = f"chats/{index}/attachments"
+                chat_data = self._write_chat(tf, merged_chat, prefix)
+                data_path = f"chats/{index}/data.json"
                 _add_string_to_tar(
-                    tf, "data.json", json.dumps(chat_data, ensure_ascii=False, indent=2)
+                    tf, data_path, json.dumps(chat_data, ensure_ascii=False, indent=2)
                 )
-                _add_string_to_tar(tf, "index.html", _read_template("reader_single.html"))
-            else:
-                manifest = []
-                for index, merged_chat in enumerate(merged_chats, start=1):
-                    chat = dict(merged_chat["chat"])
-                    chat["chat_id"] = index
-                    merged_chat = {**merged_chat, "chat": chat}
-                    prefix = f"chats/{index}/attachments"
-                    chat_data = self._write_chat(tf, merged_chat, prefix)
-                    data_path = f"chats/{index}/data.json"
-                    _add_string_to_tar(
-                        tf, data_path, json.dumps(chat_data, ensure_ascii=False, indent=2)
-                    )
-                    manifest.append({
-                        "chat_id": index,
-                        "display_name": chat.get("display_name", str(index)),
-                        "message_count": len(chat_data["messages"]),
-                        "last_date": chat.get("last_date"),
-                        "data_path": data_path,
-                    })
+                manifest.append({
+                    "chat_id": index,
+                    "display_name": chat.get("display_name", str(index)),
+                    "message_count": len(chat_data["messages"]),
+                    "last_date": chat.get("last_date"),
+                    "data_path": data_path,
+                })
 
-                _add_string_to_tar(
-                    tf, "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
-                )
-                _add_string_to_tar(tf, "index.html", _read_template("reader_multi.html"))
-
-        return buf.getvalue()
+            _add_string_to_tar(
+                tf, "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
+            )
+            _add_string_to_tar(tf, "index.html", _read_template("reader_multi.html"))
 
     def _write_chat(
         self,

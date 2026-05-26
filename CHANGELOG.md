@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.1
+
+Streaming encrypt for the export path — the symmetric counterpart of
+0.4.0's streaming decrypt. Closes the last memory-bound operation in
+the archive pipeline.
+
+### Added
+- `crypto.encrypt_archive_from_file(input_path, output_path, password, progress=None)`
+  streams a tar.gz through AES-GCM chunk-by-chunk and writes the
+  encrypted .imv directly to disk. Memory bounded by `CHUNK_SIZE`
+  rather than by the payload size. Output is byte-equivalent (under
+  decryption) to what the in-memory `encrypt_archive` would produce,
+  so this is a drop-in replacement on the write side without a format
+  bump.
+
+### Changed
+- `archive.ArchiveBuilder` (export) now writes the tar.gz to a temp
+  file alongside the eventual `.imv` output, then stream-encrypts it
+  into place. Peak memory for a 5 GB single-chat export drops from
+  ~10 GB to a few MB.
+- `archive.MergedArchiveBuilder` (merge) gets the same treatment.
+- `export --progress-json` emits a new `encrypt_progress` event during
+  the encrypt phase (after the last `chat_done`, before completion):
+  `{"event": "encrypt_progress", "chat_id": null, "processed": N, "total": M}`.
+  Older consumers that only know the chat/attachment events silently
+  ignore it; opting in is purely additive.
+
+### Notes
+- `encrypt_archive(plaintext, password) -> bytes` is unchanged for
+  callers that want the in-memory API.
+- No format change. Existing `.imv` archives keep working under both
+  the new and old code paths.
+
 ## 0.4.0
 
 Streaming viewer + structured event output. The viewer no longer holds the
