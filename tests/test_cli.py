@@ -197,6 +197,66 @@ class TestViewCommand:
             assert result.exit_code != 0
             assert "Error" in result.output
 
+    def test_view_passes_no_browser_flag(self, runner, mock_chat_db, tmp_path):
+        output = str(tmp_path / "view_no_browser.imv")
+        runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", output],
+            input="pw\npw\n",
+        )
+
+        with patch("imvault.viewer.view_archive") as mock_view:
+            mock_view.return_value = None
+            result = runner.invoke(
+                cli,
+                ["view", "--no-browser", output],
+                input="pw\n",
+            )
+            assert result.exit_code == 0
+            assert mock_view.call_args.kwargs["no_browser"] is True
+            assert mock_view.call_args.kwargs["progress_json"] is False
+
+    def test_view_passes_progress_json_flag(self, runner, mock_chat_db, tmp_path):
+        output = str(tmp_path / "view_progress.imv")
+        runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", output],
+            input="pw\npw\n",
+        )
+
+        with patch("imvault.viewer.view_archive") as mock_view:
+            mock_view.return_value = None
+            result = runner.invoke(
+                cli,
+                ["view", "--progress-json", output],
+                input="pw\n",
+            )
+            assert result.exit_code == 0
+            assert mock_view.call_args.kwargs["progress_json"] is True
+
+    def test_view_progress_json_emits_json_error(
+        self, runner, mock_chat_db, tmp_path
+    ):
+        output = str(tmp_path / "view_pj_err.imv")
+        runner.invoke(
+            cli,
+            ["--db-path", mock_chat_db, "export", "--all", "-o", output],
+            input="pw\npw\n",
+        )
+
+        with patch("imvault.viewer.view_archive") as mock_view:
+            mock_view.side_effect = ValueError("Decryption failed — wrong password")
+            result = runner.invoke(
+                cli,
+                ["view", "--progress-json", output],
+                input="wrong-pw\n",
+            )
+            assert result.exit_code != 0
+            # With --progress-json, errors must come back as a JSON envelope on
+            # stderr so the GUI can parse them.
+            assert '"error"' in result.output
+            assert '"Decryption failed' in result.output
+
 
 class TestInspectCommand:
     def test_inspect_archive(self, runner, mock_chat_db, tmp_path):

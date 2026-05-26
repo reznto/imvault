@@ -2,7 +2,12 @@
 
 import pytest
 
-from imvault.crypto import decrypt_archive, encrypt_archive, HEADER_SIZE
+from imvault.crypto import (
+    decrypt_archive,
+    decrypt_archive_to_file,
+    encrypt_archive,
+    HEADER_SIZE,
+)
 from imvault.constants import MAGIC, FORMAT_VERSION
 
 
@@ -168,3 +173,77 @@ class TestV1Compatibility:
         # Verify we can decrypt it
         decrypted = decrypt_archive(v1_archive, password)
         assert decrypted == plaintext
+
+
+class TestStreamingDecrypt:
+    """`decrypt_archive_to_file` should produce identical output to the
+    in-memory `decrypt_archive`, and should call the progress callback
+    once per decrypted chunk."""
+
+    def test_matches_in_memory_decrypt(self, tmp_path):
+        # Multi-chunk payload so v2 chunked path is exercised.
+        from imvault.constants import CHUNK_SIZE
+
+        plaintext = b"A" * (CHUNK_SIZE * 3 + 17)
+        password = "stream-test"
+        encrypted = encrypt_archive(plaintext, password)
+
+        encrypted_path = tmp_path / "archive.imv"
+        encrypted_path.write_bytes(encrypted)
+        output_path = tmp_path / "out.tar.gz"
+
+        decrypt_archive_to_file(str(encrypted_path), str(output_path), password)
+
+        assert output_path.read_bytes() == plaintext
+        assert output_path.read_bytes() == decrypt_archive(encrypted, password)
+
+    def test_progress_callback_called_per_chunk(self, tmp_path):
+        from imvault.constants import CHUNK_SIZE
+
+        # Three full chunks + a trailing partial.
+        plaintext = b"B" * (CHUNK_SIZE * 3 + 100)
+        password = "progress-test"
+        encrypted = encrypt_archive(plaintext, password)
+
+        encrypted_path = tmp_path / "archive.imv"
+        encrypted_path.write_bytes(encrypted)
+        output_path = tmp_path / "out.tar.gz"
+
+        events: list[tuple[int, int]] = []
+        decrypt_archive_to_file(
+            str(encrypted_path),
+            str(output_path),
+            password,
+            progress=lambda done, total: events.append((done, total)),
+        )
+
+        # 4 chunks total → 4 progress callbacks; total stays constant; done climbs.
+        assert len(events) == 4
+        assert all(total == 4 for _, total in events)
+        assert [done for done, _ in events] == [1, 2, 3, 4]
+
+    def test_wrong_password_raises(self, tmp_path):
+        plaintext = b"some payload"
+        encrypted = encrypt_archive(plaintext, "correct-pw")
+
+        encrypted_path = tmp_path / "archive.imv"
+        encrypted_path.write_bytes(encrypted)
+        output_path = tmp_path / "out.tar.gz"
+
+        with pytest.raises(ValueError, match="wrong password"):
+            decrypt_archive_to_file(
+                str(encrypted_path), str(output_path), "wrong-pw"
+            )
+
+    def test_truncated_archive_raises(self, tmp_path):
+        plaintext = b"C" * 1000
+        encrypted = encrypt_archive(plaintext, "pw")
+
+        encrypted_path = tmp_path / "archive.imv"
+        encrypted_path.write_bytes(encrypted[:-20])  # chop the tail
+        output_path = tmp_path / "out.tar.gz"
+
+        with pytest.raises(ValueError):
+            decrypt_archive_to_file(
+                str(encrypted_path), str(output_path), "pw"
+            )

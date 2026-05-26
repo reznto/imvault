@@ -603,8 +603,30 @@ def inspect_archives(
     default=None,
     help="Read archive password from this file descriptor.",
 )
+@click.option(
+    "--no-browser",
+    "no_browser",
+    is_flag=True,
+    help="Don't auto-launch the system browser. Useful when a GUI is embedding the URL.",
+)
+@click.option(
+    "--progress-json",
+    "progress_json",
+    is_flag=True,
+    help=(
+        "Emit one JSON event per line on stderr (decrypt_progress, "
+        "extract_progress, ready) instead of human-readable progress text. "
+        "The ready event carries url and port."
+    ),
+)
 @click.pass_context
-def view_archive_cmd(ctx: click.Context, archive: str, password_fd: int | None) -> None:
+def view_archive_cmd(
+    ctx: click.Context,
+    archive: str,
+    password_fd: int | None,
+    no_browser: bool,
+    progress_json: bool,
+) -> None:
     """Decrypt and view an .imv archive in the browser."""
     from .viewer import view_archive
 
@@ -612,12 +634,23 @@ def view_archive_cmd(ctx: click.Context, archive: str, password_fd: int | None) 
     password = get_password("Enter archive password")
 
     try:
-        view_archive(archive, password)
+        view_archive(
+            archive,
+            password,
+            no_browser=no_browser,
+            progress_json=progress_json,
+        )
     except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
+        if progress_json:
+            click.echo(json.dumps({"error": str(e), "path": archive}), err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
         sys.exit(1)
     except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
+        if progress_json:
+            click.echo(json.dumps({"error": str(e), "path": archive}), err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
